@@ -1,0 +1,151 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Cwd;
+use File::Basename;
+use Pod::Usage;
+use DBI;
+use POSIX;
+
+=head1 NAME
+
+paf2euclideandist
+
+=head1 SYNOPSIS
+
+paf2euclideandist [options] <paf-file>
+  
+ -h        help
+ paf-file  population allele frequency file 
+  
+ example: paf2euclideandist pscalare.paf
+ 
+ Calculates the Euclidean distance between populations.  
+ Note that the populations are sorted in the output gd-file.
+  
+=head1 DESCRIPTION
+
+=cut
+
+my $help;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help) || scalar(@ARGV) != 1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+foreach my $file (@ARGV)
+{
+	open(IN, $file) || die "Cannot open $file\n";
+	my $lineno = 0;
+	my @line;
+	my %POP_SNP_FREQ;
+	my @col2pop;
+	my @row2snp;
+	my @POP;
+	my @SNP;
+	my %POP_GD;
+	
+	#reads in population allele frequency information
+	while (<IN>)
+	{
+		$lineno++;
+		s/\r?\n?$//;
+		@line = split("\t");
+		
+		if ($lineno==1)
+		{
+			#reads in the populations
+			foreach my $col (1 .. $#line)
+			{
+				$col2pop[$col] = $line[$col];
+				$POP_SNP_FREQ{$line[$col]} = ();
+				$POP_GD{$line[$col]} = ();
+			}
+			
+			@POP = sort(keys(%POP_SNP_FREQ));
+		}
+		else
+		{
+			my $snp = $line[0];
+			$row2snp[$lineno] = $snp;
+			
+			#reads in the population allele frequencies
+			foreach my $col (1 .. $#line)
+			{
+				$POP_SNP_FREQ{$col2pop[$col]}{$snp} = $line[$col];
+			}
+		}
+	}
+	
+	@SNP = sort(keys(%{$POP_SNP_FREQ{$POP[0]}}));
+	my $pop1A;
+	my $pop2A;
+	my $pop1B;
+	my $pop2B;
+	my $SGM;
+	my $GD;
+	my $invalid_snps;
+	
+	for (my $pop1=0; $pop1<=$#POP; $pop1++)
+	{
+		for (my $pop2=$pop1; $pop2<=$#POP; $pop2++)
+		{
+			$SGM = 0;
+			$invalid_snps = 0;
+			
+			foreach my $snp (@SNP)
+			{
+				$pop1A = $POP_SNP_FREQ{$POP[$pop1]}{$snp};
+				$pop2A = $POP_SNP_FREQ{$POP[$pop2]}{$snp};
+			
+				if ($pop1A != -1 && $pop2A != -1)
+				{
+					$SGM += ($pop1A > $pop2A)? $pop1A - $pop2A : $pop2A - $pop1A;
+				}
+				else
+				{
+					$invalid_snps++;
+				}
+			}
+			
+			$GD = $SGM;
+			$GD /= scalar(@SNP)- $invalid_snps;
+			
+			$POP_GD{$POP[$pop1]}{$POP[$pop2]} = $GD;
+		}
+	}
+	
+	my ($name, $dir, $ext) = fileparse($file, '\..*');
+	my $distanceFile = "euclidean-dist-$name.gd";
+	open(OUT, ">$distanceFile") || die "Cannot open $distanceFile\n";
+	
+	my $header = join("\t", @POP);
+	print OUT "\t$header\n";
+
+	for (my $pop1=0; $pop1<=$#POP; $pop1++)
+	{
+		print OUT $POP[$pop1];
+				
+		for (my $pop2=0; $pop2<=$pop1; $pop2++)
+		{
+			printf(OUT "\t%2.10f", $POP_GD{$POP[$pop2]}{$POP[$pop1]});
+		}
+		
+		print OUT "\n";
+	}
+	close(OUT);
+}

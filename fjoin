@@ -1,0 +1,231 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+fjoin
+
+=head1 SYNOPSIS
+
+ fjoin [options] files
+
+  -h       help
+  -o       output file (required)
+  
+  example: fjoin pscalare.tg paltum.tg -o peimekki.tg
+           fjoin pscalare.gt paltum.gt -o peimekki.tg
+  
+  Joins gt-files or tg-files. In general, joins files that have equivalent first
+  column label and unique non first column labels across all the files.
+  Ensures that samples and SNPs are eventually unique in the output tg/gt file.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $key;
+my $mergedFile;
+my $firstFileIsProcessed = 1;
+my $filePosition;
+my $fileType;
+
+my @INDICES;
+my @FILES;
+my @FH;
+my @orderedKeys;
+my @commonOrderedKeys;
+my @fileColumnNo;
+my %columnLabels;
+my %FREQ;
+
+my $headerProcessed;
+my $colNo;
+my %label2col;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'o=s'=>\$mergedFile)
+   || !defined($mergedFile) || scalar(@ARGV)<2)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+for my $fileNo (0 .. $#ARGV)
+{
+    my $file = $ARGV[$fileNo];
+	print "Scanning and indexing $file\n";
+	
+	open($FH[$fileNo], $file) || die "Cannot open $file";
+	$headerProcessed = 0;
+	$filePosition = 0;
+	my %INDEX;
+	
+	*IN = $FH[$fileNo];
+	
+	while(<IN>)
+	{
+	    s/\r?\n?$//;
+	    
+	    if(!$headerProcessed)
+	    {
+	        $colNo = s/\t/\t/g + 1;
+	        
+	        my @fields = split('\t', $_, $colNo);
+	        
+	        if ($firstFileIsProcessed)
+            {
+                $key = $fields[0];
+                print "key detected: $key\n";
+            }
+            elsif ($fields[0] ne $key)
+            {
+                die "First column label for each file should be the same: $fields[0] != $key!";
+            }
+	        
+	        for my $col (1 .. $#fields)
+	        {
+	            if (exists($columnLabels{$fields[$col]}))
+	            {
+	                die "$fields[$col] already exists in $columnLabels{$fields[$col]}";
+	            }
+	            else
+	            {
+	                $columnLabels{$fields[$col]} = $file;
+	            }
+	        }
+	        
+	        $headerProcessed = 1;
+	    }
+	    else
+	    {
+	        my @fields = split('\t', $_, 2);
+	        
+	        if (exists($INDEX{$fields[0]}))
+	        {
+	            die "$fields[0] occurs more than once in $file";
+	        }
+	        else
+	        {
+	            $INDEX{$fields[0]} = $filePosition;
+	            $FREQ{$fields[0]}++;
+			}
+			
+			if ($firstFileIsProcessed)
+	    	{
+	    		push(@orderedKeys, $fields[0]);
+	    	}
+	    }
+	    
+	    $filePosition = tell(IN);
+	}
+	
+	if ($firstFileIsProcessed)
+	{
+	  	$firstFileIsProcessed = 0;
+	}
+	    
+	push(@INDICES, \%INDEX);
+}
+
+#find common elements
+for my $key (@orderedKeys)
+{
+    if ($FREQ{$key} == $#ARGV+1)
+    {
+        push(@commonOrderedKeys, $key);
+    }
+}
+
+print "No. of common elements: " . scalar(@commonOrderedKeys) . "\n";
+print "Merging file to $mergedFile\n";
+
+open(MERGE, ">$mergedFile") || die "Cannot open $mergedFile";
+
+#print headers
+for my $i (0 .. $#FH)
+{
+	*IN = $FH[$i];
+			
+	seek(IN, 0, 0);
+	
+	$_ = <IN>;
+	s/\r?\n?$//;
+	my @fields = split("\t", $_, 2);
+	
+	if(!defined($fields[1]))
+	{
+	    $fields[1] = "";
+	}
+
+	if ($i==0)
+	{
+		print MERGE "$fields[0]\t$fields[1]\t";
+	}	
+	elsif ($i==$#FH)
+	{
+		print MERGE "$fields[1]\n";
+	}
+	else
+	{
+		print MERGE "$fields[1]\t";
+	}
+}
+
+#join rows
+for my $key (@commonOrderedKeys)
+{	
+	for my $i (0 .. $#FH)
+	{
+		*IN = $FH[$i];
+		
+		if (exists($INDICES[$i]{$key}))
+		{
+			seek(IN, $INDICES[$i]{$key}, 0);
+			
+			$_ = <IN>;
+			s/\r?\n?$//;
+			my @fields = split("\t", $_, 2);
+			
+        	if(!defined($fields[1]))
+        	{
+        	    $fields[1] = "";
+        	}
+        
+        	if ($i==0)
+        	{
+        		print MERGE "$fields[0]\t$fields[1]\t";
+        	}	
+        	elsif ($i==$#FH)
+        	{
+        		print MERGE "$fields[1]\n";
+        	}
+        	else
+        	{
+        		print MERGE "$fields[1]\t";
+        	}
+		}
+	}
+}
+
+for my $i (0 .. $#FH)
+{
+    close($FH[$i]);
+}
+
+close(MERGE);

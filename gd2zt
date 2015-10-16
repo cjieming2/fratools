@@ -1,0 +1,84 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Cwd;
+use File::Basename;
+use Pod::Usage;
+use DBI;
+use POSIX;
+
+=head1 NAME
+
+gd2zt
+
+=head1 SYNOPSIS
+
+gd2zt [options] <gd-file>
+  
+ -h       help
+ gd-file  genetic distance file 
+  
+ example: gd2zt pscalare.gd
+ 
+ Formats genetic distance file for zt(Mantel's test).
+  
+=head1 DESCRIPTION
+
+=cut
+
+my $help;
+my $gdFile;
+my $headerProcessed;
+my $ztFile;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help) || scalar(@ARGV) != 1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$gdFile = $ARGV[0];
+
+open(GD, $gdFile) || die "Cannot open $gdFile\n";
+my $fileContent = "";
+#reads in population allele frequency information
+while (<GD>)
+{
+	s/\r?\n?$//;
+	
+	if (!$headerProcessed)
+	{
+        $headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split("\t", $_, 2);
+		
+		$fileContent .= $fields[1] . "\n";
+	}
+}
+
+$fileContent = "$.\n$fileContent";
+
+close(GD);
+
+my ($name, $dir, $ext) = fileparse($gdFile, '\..*');
+$ztFile = "$name.zt";
+open(ZT, ">$ztFile") || die "Cannot open $ztFile\n";
+
+print ZT $fileContent;
+
+close(ZT);
+

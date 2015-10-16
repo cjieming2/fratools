@@ -1,0 +1,312 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+use Switch;
+
+=head1 NAME
+
+gt2haploview
+
+=head1 SYNOPSIS
+
+ gt2haploview [options] gt-file
+    
+  -m        marker annotation file
+            a)snp-id
+            b)alleles
+            c)position
+  -s        sample annotation file
+            a)sample-id
+            b)affection (optional)
+            c)sex (optional)
+  gt-file   gt file
+  
+ example: gt2haploview -m pscalare.mk -s pscalare.sa pscalare.gt
+    
+ Converts gt file to haploview.
+       
+=head1 DESCRIPTION
+ 
+=cut
+
+
+#option variables
+my $help;
+my $mkFile;
+my $saFile;
+my $gtFile;
+my $pedFile;
+my $infoFile;
+my @col2snp;
+my %SNP;
+my %SAMPLE;
+my $colNo;
+my %label2Column;
+my $headerProcessed;
+my $sexIsUnknown = 0;
+my $affectionIsUnknown = 0;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'm=s'=>\$mkFile, 's=s'=>\$saFile)
+   || !defined($mkFile)
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$gtFile = $ARGV[0];
+
+#checks if input is genotype file
+isGt($gtFile) || die "$gtFile is not a gt file";
+    
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('snp-id', 'alleles', 'position')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+                                   
+            die "Cannot find '$label' in $mkFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        
+        my $snpID = $fields[$label2Column{'snp-id'}];
+        my $alleles = $fields[$label2Column{'alleles'}];
+        my $position = $fields[$label2Column{'position'}];
+        
+        my @alleles = split('/', $alleles, -1);
+		my $allele = $alleles[0];
+
+        switch ($allele) 
+       	{ 
+       		case 'A' {$alleles[0] = 1}
+            case 'C' {$alleles[0] = 2}
+       	    case 'G' {$alleles[0] = 3}
+            case 'T' {$alleles[0] = 4}
+            else {$alleles[0] = 0}
+        }                               
+
+		$allele = $alleles[1];
+
+        switch ($allele) 
+       	{ 
+       		case 'A' {$alleles[1] = 1}
+            case 'C' {$alleles[1] = 2}
+       	    case 'G' {$alleles[1] = 3}
+            case 'T' {$alleles[1] = 4}
+            else {$alleles[1] = 0}
+        }
+					
+        $SNP{$snpID}{-1} = "0 0";
+        $SNP{$snpID}{0} = "$alleles[0] $alleles[0]";
+        $SNP{$snpID}{1} = "$alleles[0] $alleles[1]";
+        $SNP{$snpID}{2} = "$alleles[1] $alleles[1]";        
+    
+    	$SNP{$snpID}{POSITION} = $position;
+    }
+}
+close(MK);
+
+if (defined($saFile))
+{	
+	open(SA, $saFile) || die "Cannot open $saFile";
+	$headerProcessed = 0;
+	while(<SA>)
+	{
+	    s/\r?\n?$//;
+	    
+	    if(!$headerProcessed)
+	    {
+	        $colNo = s/\t/\t/g + 1;
+	        
+	        my @fields = split('\t', $_, $colNo);
+	        
+	        SEARCH_LABEL: for my $label ('sample-id', 'affection', 'sex')
+	        {
+	            for my $col (0 .. $#fields)
+	            {
+	                if ($fields[$col] eq $label)
+	                {           
+	                    $label2Column{$label}=$col;
+	                    next SEARCH_LABEL;
+	                }
+	            }
+	            
+	            if ($label eq 'sex')
+	            {
+	            	$sexIsUnknown = 1;
+	            } 
+	            elsif ($label eq 'affection')
+	            {
+	            	$affectionIsUnknown = 1;
+	            }
+	            else
+	            {
+	            	die "Cannot find '$label' in $saFile";
+	            }
+	        }
+	        
+	        $headerProcessed = 1;
+	    }
+	    else
+	    {
+	        my @fields = split('\t', $_, $colNo);
+	        my $sampleID = $fields[$label2Column{'sample-id'}];
+				
+			if (!$affectionIsUnknown)
+			{
+				my $affection = $fields[$label2Column{'affection'}];
+				
+				if ($affection eq 'case')
+				{
+		        	$SAMPLE{$sampleID}{AFFECTION} = 2;
+		    	}
+		    	elsif ($affection eq 'control')
+		    	{
+		    		$SAMPLE{$sampleID}{AFFECTION} = 1;
+		    	}
+		    	else
+		    	{
+		    		print "ANNNOTATION : $sampleID affection unknown\n";
+		    		$SAMPLE{$sampleID}{AFFECTION} = 0;
+		    	}
+	    	}
+	    	
+	    	if (!$sexIsUnknown)
+			{
+				my $sex = $fields[$label2Column{'sex'}];
+				
+		    	if ($sex eq 'male')
+				{
+		        	$SAMPLE{$sampleID}{SEX} = 1;
+		    	}
+		    	elsif ($sex eq 'female')
+		    	{
+		    		$SAMPLE{$sampleID}{SEX} = 2;
+		    	}
+		    	else
+		    	{
+		    		$SAMPLE{$sampleID}{SEX} = 0;
+		    	}
+		    }
+	    }
+	}
+	close(SA);
+}
+
+open(GT, "$gtFile") || die "Cannot open $gtFile\n";
+$headerProcessed = 0;
+if(!defined($pedFile))  
+{
+	my ($name, $path, $ext) = fileparse($gtFile, '\..*');
+	$pedFile = "haploview-$name.ped";
+}
+open(PED, ">$pedFile") || die "Cannot open $pedFile\n";
+if(!defined($infoFile))  
+{
+	my ($name, $path, $ext) = fileparse($gtFile, '\..*');
+	$infoFile = "haploview-$name.info";
+}
+open(INFO, ">$infoFile") || die "Cannot open $infoFile\n";
+while (<GT>)
+{
+    s/\r?\n?$//;
+   
+    if(!$headerProcessed)
+    {
+        #counts number of columns
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+
+        for my $col (1 .. $#fields)
+        {
+        	my $snpID = $fields[$col];
+            
+            if(exists($SNP{$snpID}))
+            {
+            	$col2snp[$col] = $snpID;
+            	print INFO "$snpID\t$SNP{$snpID}{POSITION}\n";
+            }
+            else
+            {
+            	die "$snpID does not exist in $mkFile";
+            }
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        	
+       	my $sampleID = $fields[0];
+    	my $affection;
+    	my $sex;
+    	
+    	if(!$affectionIsUnknown && exists($SAMPLE{$sampleID}))
+    	{
+    		$affection = $SAMPLE{$sampleID}{AFFECTION};
+    	}
+    	else
+    	{
+    		$affection = 0;
+    	}
+
+    	if(!$sexIsUnknown && exists($SAMPLE{$sampleID}))
+    	{
+    		$sex = $SAMPLE{$sampleID}{SEX};
+    	}
+    	else
+    	{
+    		$sex = 0;
+    	}
+    	
+        print PED "$sampleID\t$sampleID\t0\t0\t$sex\t$affection";
+        
+        for my $col (1..$#fields)
+        {
+            print PED "\t$SNP{$col2snp[$col]}{$fields[$col]}";
+        }
+        
+        print PED "\n";
+    }
+}
+close(PED);
+close(INFO);
+close(GT);

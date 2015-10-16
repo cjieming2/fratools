@@ -1,0 +1,115 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+autorun
+
+=head1 SYNOPSIS
+
+ csv2tsv [options] <filename>...	
+	
+  -v verbose
+  -d debug
+	
+  Converts a csv file to a tsv file.
+  Overwrites any existing file that might have the same name as the new tsv file.
+  
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $verbose = 0;
+my $debug = 0;
+my $help;
+my $warned;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'v'=>\$verbose,'d'=>\$debug) || scalar(@ARGV)==0)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+foreach my $file (@ARGV)
+{
+	if ($verbose) {print "Converting $file to tsv format\n"}
+
+	#checks if it is a .csv file
+	if($file!~/\.csv$/)
+	{
+		die "$file not a csv file";
+	}
+
+	open(IN, $file) || die "Cannot open $file\n";
+	
+	#prepare an output file with the original file name but with the csv extension converted to tsv
+	my ($name, $path, $ext) = fileparse($file, '\..*?');
+	my $outFile = "$name.tsv";
+	if ($debug) {print STDERR "outfile: $outFile\n"}
+	open(OUT, ">$outFile") || die "Cannot open $outFile\n";
+
+	#keeps track of the number of columns expected in the csv file
+	my $colNo;
+
+	while (<IN>)
+	{
+		s/\r?\n?$//;
+
+		#array to store the field data extracted
+	    my @fields  = ();
+	    
+	    #First literal picks up fields in "", format
+	    #Second literal picks up fields in , format
+	    #Third literal ... II have no idea why you would need the 3rd literal
+	    while (/"([^\"\\]*(?:\\.[^\"\\]*)*)",?|([^,]+),?|,/g)
+	    {
+	    	push(@fields, $+);
+	    }
+	    
+	    if(substr($_, -1, 1) eq ',')
+	    {
+	    	push(@fields, undef);
+	    }
+
+		#updates the expected number of data fields in the csv file
+		if($.==1)
+		{
+			$colNo = scalar(@fields);
+		}
+		
+		#checks if the expected number of data fields are extracted with each processed line
+		if(scalar(@fields)!=$colNo)
+		{
+			if (!$warned)
+			{
+				warn "$file: Line $. does not have the same number of columns (" . scalar(@fields) . ") as previous rows (" . $colNo ."). \n";
+				$warned = 1;
+			}
+		}
+	    
+	    map {if(defined){$_=~s/^\s+//}else{$_=""}} @fields;
+	    map {$_=~s/\s+$//} @fields;
+	      
+	    my $fields = join("\t", @fields);
+	    print OUT "$fields\n";
+	}
+	
+	close(IN);
+	close(OUT);
+}

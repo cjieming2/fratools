@@ -1,0 +1,98 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+illumina2tg
+
+=head1 SYNOPSIS
+
+ illumina2tg [options] <filename>
+  -h  help
+  -m  SNP annotation file
+    
+ example: illumina2tg -m pscalare.mk pscalare.txt
+ 
+ Converts an Illumina matrix file with [ACGT][ACGT] and -- encoding to a tgfile.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $snpAnnotationFile;
+my $illuminaGenotypeFile;
+my $genotypeFile;
+my @col2snp;
+my %SNP;
+my $colNo;
+my %anno2col;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help) || scalar(@ARGV) != 1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$illuminaGenotypeFile = $ARGV[0];
+
+open(IN, "$illuminaGenotypeFile") || die "Cannot open $illuminaGenotypeFile\n";
+
+$genotypeFile = "helixtree-$illuminaGenotypeFile";
+
+open(OUT, ">$genotypeFile") || die "Cannot open $genotypeFile\n";
+
+while (<IN>)
+{
+    s/\r?\n?$//;
+   
+    if($.==1)
+    {
+    	$colNo = s/\t/\t/g + 1;
+    	    		
+        print OUT "$_\n";
+    }
+    else
+    {
+    	my @fields = split('\t', $_, $colNo);
+    
+        print OUT "$fields[0]";
+
+		my $snp = $fields[0];
+
+		for my $col (1..$#fields)
+		{
+			my $genotype = $fields[$col];
+			
+			if ($genotype ne '--')
+			{
+				$genotype =~ /([ACGT])([ACGT])/;
+				print OUT "\t$1_$2";
+			}
+			else
+			{
+				print OUT "\t?_?";
+			}
+		}
+
+        print OUT "\n";
+    }
+}
+
+close(OUT);
+close(IN);

@@ -1,0 +1,113 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use POSIX qw(ceil floor);
+use File::Path;
+use Pod::Usage;
+
+=head1 NAME
+
+distinct
+
+=head1 SYNOPSIS
+
+    usage: distinct <filename>	
+	
+    -h help : displays this help
+    -s summarize : summarizes the distinct values and total number of values
+    -k histogram : prints the values and the corresponding number of occurrences
+    -c column number (default 1)
+    	
+    example: distinct -c4 pscalare.txt
+    
+    Prints distinct values from a column of a file. Can read from STDIN too.
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $verbose;
+my $debug;
+my $help;
+my $histogram = 0;
+my $summarize = 0;
+my $col = 1;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 's'=>\$summarize, 'k'=>\$histogram, 'c=i'=>\$col) 
+	|| $col<1 || $help || scalar(@ARGV)>1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+#STDIN redirection
+if (scalar(@ARGV)==1)
+{
+	open(IN, $ARGV[0]) || die "Cannot open $ARGV[0]\n";
+}
+else
+{
+	*IN = *STDIN;
+}
+
+#contains values found in column
+my %VALUES;
+my @orderedValues;
+#true index in the array
+my $i = $col-1;
+my $colNo;
+
+while(<IN>)
+{
+	s/\r?\n?$//;
+	
+	#detects number of columns
+	$colNo = s/\t/\t/g + 1 if ($.==1);
+	
+	my @fields = split('\t', $_, $colNo);
+	
+	my $value = $fields[$i];
+	
+	if(!defined($value))
+	{
+		$value = "";
+	}
+
+	if(!exists($VALUES{$value}))
+	{
+		push(@orderedValues, $value); 
+	}
+
+	$VALUES{$value}++;
+}
+
+if ($summarize)
+{
+	#prints a summary of the total nummber of values and the number of distinct values
+	print "Number of values: $.\n";
+	print "Number of distinct values: " . scalar(keys(%VALUES)) . "\n";
+}
+elsif ($histogram)
+{
+	print "value\toccurrences\n";
+	map {print "$_\t$VALUES{$_}\n"} sort(keys(%VALUES));
+}
+else
+{
+	#prints distinct values
+	map {print "$_\n"} @orderedValues;
+}
+
+close(IN);

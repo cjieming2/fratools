@@ -1,0 +1,584 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Cwd;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+frecode
+
+=head1 SYNOPSIS
+
+frecode [options] <tg-file>
+  
+ -h          help
+ -strand    (top|bot|affyref|forward|forward-topbot)
+             a)top/bot - as defined by Illumina
+             b)affyref - as defined by Affymetrix 
+               Exception class SNPs are handled, please use 
+               probe set id for identification.
+               when synchronizing to affyref, please use affy probe set id.
+             c)forward - alleles from forward (+) strand defined 
+               by NCBI Genome Assembly, alleles lexically ordered.
+             d)forward-topbot - alleles from forward (+) strand defined 
+               by NCBI Genome Assembly, alleles ordered according to top bot
+               classification of forward strand.
+ -m          mk-file
+             a)snp-id
+             b)alleles
+             c)alleles-strand
+             d)flanks
+             e)strand (required only for synching to the forward strand)
+ tg-file     marker-sample oriented genotype file
+ 
+ example: frecode -m pscalare.mk pscalare.tg --strand top
+ 
+ Recodes the alleles in a tg file.
+ If a SNP is not topbotifiable or affyrefeable, the original encoding is 
+ retained and a warning is given.
+ Outputs recoded-<mk-file> and recoded-<tg-file>.
+ 
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $desiredStrand;
+my $reportOldEncoding;
+my $mkFile;
+
+#variables
+my $tgFile;
+my $recodedMkFile;
+my $recodedTgFile;
+my @column2Marker;
+my %label2Column;
+my $colNo;
+my $headerProcessed;
+my %SNP;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'o'=>\$reportOldEncoding, 'm=s'=>\$mkFile, 'strand=s'=>\$desiredStrand)
+   || !defined($mkFile)
+   || !defined($desiredStrand)
+   || $desiredStrand!~/^(top|bot|affyref|forward|forward-topbot)$/)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$tgFile = $ARGV[0];
+isTg($tgFile) || die "$tgFile not a tg file";
+
+my($name, $path, $ext) = fileparse($mkFile, '\..*');
+$recodedMkFile = "recoded-$name.mk";
+open(RECODED_MK, ">$recodedMkFile") || die "Cannot open $recodedMkFile\n";
+
+open(MK, $mkFile) || die "Cannot open $mkFile";
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('snp-id', 'alleles', 'alleles-strand', 'flanks', 'strand')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            if ($desiredStrand eq 'forward')
+            {
+                die "Cannot find '$label' in $mkFile";
+            }
+            else
+            {
+                if ($label ne 'strand')
+                {
+                    die "Cannot find '$label' in $mkFile";
+                }
+            } 
+        }
+        
+        #print contents of old mk file      
+        for my $col (0 .. $#fields)
+        {
+            my $label = $fields[$col];
+            
+            if ($label eq 'alleles')
+            {           
+                #don't print
+            }
+            elsif ($label eq 'alleles-strand')
+            {
+                #don't print
+            }
+            elsif ($label eq 'flanks')
+            {
+                #don't print
+            }
+            else
+            {
+                print RECODED_MK "$label\t";
+            }
+        }
+        
+        print RECODED_MK "alleles\talleles-strand\tflanks\n";
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $snp = $fields[$label2Column{'snp-id'}];
+        my $alleles = $fields[$label2Column{'alleles'}];
+        my @alleles = split('/', $alleles);
+        my $allelesStrand = $fields[$label2Column{'alleles-strand'}];
+        my $flanks = $fields[$label2Column{'flanks'}];
+
+        #check integrity of alleles, allelesStrand and flanks
+        #makes sure that the alleles are synchronized with the alleles in the flanks wrt alleles-strand
+        #this clearly removes problems that are detectable if the SNPs are unambiguous
+        #10,090,600 dimorphic SNPs from db126
+        #A/G - 64.84%
+        #A/T - 7.6%
+        #C/G - 8.94%
+        #A/C - 18.42%
+        #Fortunately since most of the SNPs on the GWS chips tend to be non-ambiguous SNPs, things should be fine.
+        if($flanks =~ /\[([ACGT-]+)\/([ACGT-]+)\]/
+           && ($1 ne '-' || $2 ne '-'))
+        {
+            my $flanksAlleleA = $1;
+            my $flanksAlleleB = $2;
+            
+            if ($allelesStrand eq 'ref')
+            {
+                if ($alleles =~ /^([ACGT-]+)\/([ACGT-]+)$/)
+                {
+                    unless(($flanksAlleleA eq $1 && $flanksAlleleB eq $2) ||
+                           ($flanksAlleleA eq $2 && $flanksAlleleB eq $1))
+                    {
+                        die "$snp: $alleles conflict with $flanks";
+                    }
+                }
+                else
+                {
+                    die "$snp: $alleles not in correct format";
+                }
+            }
+            elsif ($allelesStrand eq 'opp')
+            {
+                if ($alleles =~ /^([ACGT-]+)\/([ACGT-]+)$/)
+                {
+                    my $alleleA = reverseComplement($1);
+                    my $alleleB = reverseComplement($2);
+                    
+                    unless(($flanksAlleleA eq $alleleA && $flanksAlleleB eq $alleleB) ||
+                           ($flanksAlleleA eq $alleleB && $flanksAlleleB eq $alleleA))
+                    {
+                        die "$snp: $alleles conflict with $flanks";
+                    }
+                }
+                else
+                {
+                    die "$snp: $alleles not in correct format";
+                }
+            }
+            else
+            {
+                die "$snp: $allelesStrand not recognised";
+            }
+        }
+        elsif ($flanks eq 'n/a' && $alleles eq 'n/a' && $allelesStrand eq 'n/a')
+        {
+            #do nothing, will be resolved by undefined reference strands
+        }
+        else
+        {
+            die "$snp: $flanks not in correct flanks format"
+        }
+
+        my $complement = 0;
+        my $swap = 0;
+        
+        my $recodedAllelesStrand;
+        my @recodedAlleles;
+        
+        #top/bot options
+        if ($desiredStrand=~/(top|bot)/)
+        {
+            #get orientation of flanks
+            my $referenceStrandOrientation = getTopBotStrandFromFlanks($flanks);
+            
+            if(!defined($referenceStrandOrientation))
+            {
+                warn "$snp is not topbotifiable, original encoding retained";
+                @recodedAlleles = @alleles;
+                $recodedAllelesStrand = $allelesStrand;
+                $complement = 0;
+                $swap = 0;
+            }
+            else
+            {
+                #gets the required allelesStrand after the recoding
+                $recodedAllelesStrand = ($referenceStrandOrientation eq $desiredStrand) ?  'ref' : 'opp';
+                
+                #checks if complementing is required
+                #0 for no need to complement, 1 for complementing
+                $complement = ($recodedAllelesStrand eq $allelesStrand) ?  0 : 1;
+                
+                #figures out of the alleles are ordered
+                #-1 for ordered, 1 for reverse ordered
+                my $alleleOrder = ($alleles[0] cmp $alleles[1])<0 ? -1 : 1;
+                
+                #Because the complement step occurs before the swapping step,
+                #this returns the order status of the alleles after the complementing step
+                #e.g.
+                #A/G     => complement => G/T
+                #ordered => complement => unordered
+                $alleleOrder = $complement ? -$alleleOrder : $alleleOrder; 
+                
+                #figures out the order required, TOP requires order, BOTTOM requires reverse order
+                my $desiredOrder = ($desiredStrand eq 'top') ?  -1 : 1;
+                
+                #checks if swapping is required
+                #0 for no need to swap, 1 for swapping
+                $swap = ($desiredOrder == $alleleOrder) ?  0 : 1;
+            }               
+        }
+        elsif ($desiredStrand eq 'affyref')
+        {
+            #get orientation of flanks
+            my $referenceStrandOrientation = getAffyRefOppStrandFromFlanks($flanks);
+            
+            if(!defined($referenceStrandOrientation))
+            {
+                warn "$snp is not affyrefable, original encoding retained";
+                @recodedAlleles = @alleles;
+                $recodedAllelesStrand = $allelesStrand;
+                $complement = 0;
+                $swap = 0;
+            }
+            else
+            {
+                #corrects for exception class SNPs
+                if(isInAffymetrixExceptionClass($snp))
+                {
+                    if ($referenceStrandOrientation eq 'affyref')
+                    {
+                        $referenceStrandOrientation = 'affyopp';
+                    }
+                    else
+                    {
+                        $referenceStrandOrientation = 'affyref';
+                    }
+                }
+                
+                #gets the required allelesStrand after the recoding
+                $recodedAllelesStrand = ($referenceStrandOrientation eq $desiredStrand) ?  'ref' : 'opp';
+                
+                #checks if complementing is required
+                #0 for no need to complement, 1 for complementing
+                $complement = ($recodedAllelesStrand eq $allelesStrand) ?  0 : 1;
+                
+                #figures out of the alleles are ordered
+                #-1 for ordered, 1 for reverse ordered
+                my $alleleOrder = ($alleles[0] cmp $alleles[1])<0 ? -1 : 1;
+                
+                #Because the complement step occurs before the swapping step,
+                #this returns the order status of the alleles after the complementing step
+                #e.g.
+                #A/G     => complement => G/T
+                #ordered => complement => unordered
+                $alleleOrder = $complement ? -$alleleOrder : $alleleOrder; 
+                
+                #figures out the order required, AFFY REF and OPP requires order, 
+                #this is not officially defined for AFFY OPP but it really seems 
+                #that this is true
+                my $desiredOrder = -1;
+                
+                #checks if swapping is required
+                #0 for no need to swap, 1 for swapping
+                $swap = ($desiredOrder == $alleleOrder) ?  0 : 1;
+            }                   
+        }
+        elsif ($desiredStrand eq 'forward')
+        {
+            my $strand = $fields[$label2Column{'strand'}];
+            
+            #get orientation of flanks
+            my $referenceStrandOrientation;
+            
+            if ($strand eq 'n/a')
+            {
+               $referenceStrandOrientation = undef; 
+            }
+            elsif ($strand eq '+')
+            {
+               $referenceStrandOrientation = 'forward'; 
+            }
+            elsif ($strand eq '-')
+            {
+               $referenceStrandOrientation = 'reverse'; 
+            }
+            else
+            {
+               die "invalid strand: $strand";
+            }
+            
+            if(!defined($referenceStrandOrientation))
+            {
+                warn "$snp is not forwardable, original encoding retained";
+                @recodedAlleles = ('n', 'a');
+                $recodedAllelesStrand = $allelesStrand;
+                $complement = 0;
+                $swap = 0;
+            }
+            else
+            {                
+                #gets the required allelesStrand after the recoding
+                $recodedAllelesStrand = ($referenceStrandOrientation eq $desiredStrand) ?  'ref' : 'opp';
+                
+                #checks if complementing is required
+                #0 for no need to complement, 1 for complementing
+                $complement = ($recodedAllelesStrand eq $allelesStrand) ?  0 : 1;
+                
+                #figures out of the alleles are ordered
+                #-1 for ordered, 1 for reverse ordered
+                my $alleleOrder;
+                
+                if($complement)
+                {
+                    $alleleOrder = (reverseComplement($alleles[0]) cmp reverseComplement($alleles[1]))<0 ? -1 : 1;
+                    #$alleleOrder = 1;
+                }
+                else
+                {
+                    $alleleOrder = ($alleles[0] cmp $alleles[1])<0 ? -1 : 1;
+                }
+                
+                #figures out the order required, this is a definition for forward encoding
+                my $desiredOrder = -1;
+                
+                #checks if swapping is required
+                #0 for no need to swap, 1 for swapping
+                $swap = ($desiredOrder == $alleleOrder) ?  0 : 1;
+            }                   
+        }
+        elsif ($desiredStrand eq 'forward-topbot')
+        {
+            my $strand = $fields[$label2Column{'strand'}];
+            
+            #get orientation of flanks
+            my $referenceStrandOrientation = getTopBotStrandFromFlanks($flanks);
+            
+            if ($strand eq 'n/a' || !defined($referenceStrandOrientation))
+            {
+               $referenceStrandOrientation = undef; 
+            }
+            elsif ($strand eq '+' && $referenceStrandOrientation eq 'top')
+            {
+               $referenceStrandOrientation = 'forward-top'; 
+            }
+            elsif ($strand eq '+' && $referenceStrandOrientation eq 'bot')
+            {
+               $referenceStrandOrientation = 'forward-bot'; 
+            }
+            elsif ($strand eq '-' && $referenceStrandOrientation eq 'top')
+            {
+               $referenceStrandOrientation = 'reverse-top'; 
+            }
+            elsif ($strand eq '-' && $referenceStrandOrientation eq 'bot')
+            {
+               $referenceStrandOrientation = 'reverse-bot'; 
+            }           
+            else
+            {
+               die "invalid strand: $strand";
+            }
+            
+            if(!defined($referenceStrandOrientation))
+            {
+                warn "$snp is not forward-topbotifiable, original encoding retained";
+                @recodedAlleles = ('n', 'a');
+                $recodedAllelesStrand = $allelesStrand;
+                $complement = 0;
+                $swap = 0;
+            }
+            else
+            {                
+                #gets the required allelesStrand after the recoding
+                $recodedAllelesStrand = ($referenceStrandOrientation =~ /^forward/) ?  'ref' : 'opp';
+                
+                #checks if complementing is required
+                #0 for no need to complement, 1 for complementing
+                $complement = ($recodedAllelesStrand eq $allelesStrand) ?  0 : 1;
+                
+                #figures out of the alleles are ordered
+                #-1 for ordered, 1 for reverse ordered
+                my $alleleOrder;
+                #figures out the order required, this is a definition for forward encoding
+                my $desiredOrder;
+                
+                if($complement)
+                {
+                    $alleleOrder = (reverseComplement($alleles[0]) cmp reverseComplement($alleles[1]))<0 ? -1 : 1;
+                    if ($referenceStrandOrientation =~ /top$/)
+                    {
+                        $desiredOrder = 1;
+                    }
+                    else #bot
+                    {
+                        $desiredOrder = -1;
+                    }               
+                }
+                else #not reverse complement
+                {
+                    $alleleOrder = ($alleles[0] cmp $alleles[1])<0 ? -1 : 1;
+                    if ($referenceStrandOrientation =~ /top$/)
+                    {
+                        $desiredOrder = -1;
+                    }
+                    else #bot
+                    {
+                        $desiredOrder = 1;
+                    }
+                }
+                
+                #checks if swapping is required
+                #0 for no need to swap, 1 for swapping
+                $swap = ($desiredOrder == $alleleOrder) ?  0 : 1;
+            }                   
+        }
+                
+        #complementing step
+        if ($complement)
+        {
+            $recodedAlleles[0] = reverseComplement($alleles[0]);
+            $recodedAlleles[1] = reverseComplement($alleles[1]);
+        }
+        else
+        {
+            @recodedAlleles = @alleles;
+        }
+        
+        #swapping step
+        if ($swap)
+        {
+            ($recodedAlleles[0], $recodedAlleles[1]) = ($recodedAlleles[1], $recodedAlleles[0]);
+            
+            $SNP{$snp}{0} = 2;
+            $SNP{$snp}{1} = 1;
+            $SNP{$snp}{2} = 0;
+        }
+        else
+        {
+            $SNP{$snp}{0} = 0;
+            $SNP{$snp}{1} = 1;
+            $SNP{$snp}{2} = 2;
+        }
+        
+        #print contents of old mk file
+        my $allelesFieldNo = $label2Column{'alleles'};
+        my $allelesStrandFieldNo = $label2Column{'alleles-strand'};
+        my $flanksFieldNo = $label2Column{'flanks'};
+        
+        for my $col (0 .. $#fields)
+        {       
+            if ($col == $allelesFieldNo)
+            {
+                #don't print
+            }   
+            elsif ($col == $allelesStrandFieldNo)
+            {
+                #don't print
+            }
+            elsif ($col == $flanksFieldNo)
+            {
+                #don't print
+            }
+            else
+            {
+                print RECODED_MK "$fields[$col]\t";
+            }
+        }
+        
+        print RECODED_MK join("/", @recodedAlleles) . "\t$recodedAllelesStrand\t$flanks\n";
+    }
+}
+close(MK);
+close(RECODED_MK);
+
+($name, $path, $ext) = fileparse($tgFile, '\..*');
+$recodedTgFile = "recoded-$name.tg";
+open(RECODED_TG, ">$recodedTgFile") || die "Cannot open $recodedTgFile\n";
+
+open(TG, "$tgFile") || die "Cannot open $tgFile\n";
+$headerProcessed = 0;
+while (<TG>)
+{
+    s/\r?\n?$//;
+   
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        print RECODED_TG "$_\n";
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+    
+        my $snp = $fields[0];
+
+        print RECODED_TG "$snp";
+        
+        for my $col (1..$#fields)
+        {
+            my $genotype = $fields[$col];
+            
+            if ($genotype == -1)
+            {
+                print RECODED_TG "\t$genotype";
+            }
+            elsif (exists($SNP{$snp}{$genotype}))
+            {
+                print RECODED_TG "\t$SNP{$snp}{$genotype}";
+            }
+            else
+            {
+                warn"$snp: Unrecognised genotype: $genotype";
+            }
+        }
+
+        print RECODED_TG "\n";
+    }
+}
+
+close(TG);
+close(RECODED_TG);

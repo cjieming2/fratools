@@ -1,0 +1,126 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use POSIX qw(ceil floor);
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+tbstat
+
+=head1 SYNOPSIS
+
+usage: tbstat [options] <tsv-file>
+
+ -h        help	
+ -v        verbose
+ -d        debug
+ -c        column (>= 1, default 1)
+ -l        calculate lambda GC, assumes that values are Chisq (1 d.f) statistics
+ --beta    estimate alpha and beta parameters from mean and variance
+ tsv-file  tab separated value file with headers
+ 
+ Calculates the mean, median, minimum and maximum of a column of data.
+	
+=head1 DESCRIPTION
+
+=cut
+
+#reads in annotation file
+my $verbose;
+my $debug;
+my $help;
+my $col = 1;
+my $lambdaGC;
+my $betaParametersEstimation;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'v'=>\$verbose,'d'=>\$debug,'c=i'=>\$col, 'l'=>\$lambdaGC, 'beta'=>\$betaParametersEstimation) 
+   || $help
+   || $col<1 
+   || scalar(@ARGV)>1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+if(scalar(@ARGV)==0)
+{
+	*IN = *STDIN;
+}
+else
+{
+	open(IN, $ARGV[0]) || die "Cannot open $ARGV[0]";
+}
+
+my $colNo;
+my $i = $col - 1;
+my @DATA;
+my @fields;
+
+while (<IN>)
+{
+	s/\r?\n?$//;
+	
+	@fields = split("\t");
+	push(@DATA, $fields[$i]);
+
+	
+	if ($verbose) {print STDERR "$fields[$i]\n"}
+}
+
+@DATA = sort {$a<=>$b} @DATA;
+
+my $total = 0;
+my $min = $DATA[0];
+my $max = $DATA[0];
+
+for my $j(0 .. $#DATA)
+{
+	$total += $DATA[$j];
+	$min = $DATA[$j] if ($DATA[$j]<$min);
+	$max = $DATA[$j] if ($DATA[$j]>$max);
+}
+
+my $n = scalar(@DATA);
+my $mean = $total/$n;
+my $median = ($DATA[floor($#DATA/2)]+$DATA[ceil($#DATA/2)])/2;
+
+my $ss = 0;
+my $sc = 0;
+
+for my $j(0 .. $#DATA)
+{
+	$ss += ($DATA[$j] - $mean)**2;
+	$sc += ($DATA[$j] - $mean)**3;
+}
+
+my $variance = $ss/($n-1);
+my $skew = $ss!=0 ? (sqrt($n*($n-1))/($n-2))*((sqrt($n)*$sc)/sqrt($ss**3)) : 0;
+my $cov = sqrt($variance)/$mean;
+my $alpha = $mean * (( $mean * (1-$mean) / $variance) - 1 );
+my $beta = (1 - $mean) *  (( $mean * (1-$mean) / $variance) - 1 );
+
+printf "N: %d\n", $n;
+printf "Sum: %.4f\n", $total;
+printf "Mean: %.4f\n", $mean;
+printf "Median: %.4f\n", $median;
+printf "lambda GC: %.4f\n", $median/0.456 if $lambdaGC;
+printf "Variance: %.4f\n", $variance;
+printf "Std. Dev.: %.4f\n", sqrt($variance);
+printf "Coefficient of variance: %.4f\n", $cov;
+printf "Skew: %.4f\n", $skew;
+printf "Minimum: %.4f\n", $min;
+printf "Maximum: %.4f\n", $max;
+printf "alpha: %.4f\n", $alpha if $betaParametersEstimation;
+printf "beta: %.4f\n", $beta if $betaParametersEstimation;

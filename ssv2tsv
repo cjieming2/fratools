@@ -1,0 +1,92 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use fralib;
+use POSIX qw(ceil floor);
+use File::Path;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+ssv2tsv
+
+=head1 SYNOPSIS
+
+    usage: ssv2tsv <filename>	
+	
+    -h help : displays this help
+    	
+    example: ssv2tsv pscalare.txt
+    
+    Replaces the space delimiters to tab delimiters in a text file.
+    This is equivalent to
+    
+    cat pscalare.txt | tr -s '\s' '\t'
+    
+    Output file is named as <filename>.txt
+    Reads from STDIN too.  In this case, output is STDOUT.
+    
+    This is appropriate for plink output but please note that there 
+    are spacings on the edge of each line.  A good way to handle this
+    is by using trim.
+    
+    e.g. cat plink.assoc | trim | ssv2tsv > plink.assoc.txt
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $columnNo;
+my $currentColumnNo;
+my $line;
+my $ssvFile;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help) || $help || scalar(@ARGV)>1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+#STDIN redirection
+if (scalar(@ARGV)==1)
+{
+    $ssvFile = $ARGV[0];
+	open(IN, $ssvFile) || die "Cannot open $ssvFile\n";
+	my ($name, $dir, $ext) = fileparse($ssvFile, '\..*');
+	open(OUT, ">$name.$ext.tsv") || die "Cannot open $ssvFile\n";
+}
+else
+{
+	*IN = *STDIN;
+	*OUT = *STDOUT;
+}
+
+while(<IN>)
+{
+	s/\r?\n?$//;
+
+   	#detects number of columns
+   	$columnNo = s/\s+/\t/g + 1 if $.==1;
+  
+    $currentColumnNo = s/\s+/\t/g + 1;
+	
+	warn "Different number of columns detected in line $." if $columnNo != $currentColumnNo;
+	
+    print OUT "$_\n";
+}
+
+close(IN);

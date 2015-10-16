@@ -1,0 +1,123 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+exemplar2tg
+
+=head1 SYNOPSIS
+
+ exemplar2tg [options] <exemplar-file>
+  -h            help
+  exemplar-file comma separated value file
+    
+ example: exemplar2tg pscalare.csv
+ 
+ No marker file is required, it is the user's onus to ensure the marker file generated is correct.
+ Converts exemplar [blank],0,1,2,3 encoding to fratools -1,0,1,2 encoding.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $exemplarFile;
+my $tgFile;
+my $colNo;
+my $headerProcessed;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help)
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$exemplarFile = $ARGV[0];
+
+open(EXEMPLAR, "$exemplarFile") || die "Cannot open $exemplarFile\n";
+
+if (!defined($tgFile))
+{
+	my ($name, $dir, $ext) = fileparse($exemplarFile, '\..*');
+	$tgFile = "$name.tg";
+}
+
+open(TG, ">$tgFile") || die "Cannot open $tgFile\n";
+$headerProcessed = 0;
+while (<EXEMPLAR>)
+{
+    s/\r?\n?$//;
+   
+    if(!$headerProcessed)
+    {
+    	$colNo = s/,/,/g + 1;
+    	
+    	my $header = $_;
+    	$header =~ s/,/\t/g;
+    	
+    	my @fields = split('\t', $header, 2);
+        print TG "snp-id\t$fields[1]\n";
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+    	my @fields = split(',', $_, $colNo);
+    
+        my $snp = $fields[0];
+		print TG "$snp";
+		
+		for my $col (1..$#fields)
+		{
+			my $genotype = $fields[$col];
+				
+			if ($genotype == 1)
+			{
+				print TG "\t0";
+			}
+			elsif ($genotype == 2)
+			{
+				print TG "\t1";
+			}
+			elsif ($genotype == 3)
+			{
+				print TG "\t2";
+			}
+			elsif (!defined($genotype))
+			{
+				print TG "\t-1";
+			}
+			elsif ($genotype == 0)
+			{
+				print TG "\t-1";
+			}			
+			else
+			{
+				die "Encoding not valid for $snp at column $col : $genotype";
+			}
+
+		}
+
+        print TG "\n";
+    }
+}
+
+close(TG);
+close(EXEMPLAR);

@@ -1,0 +1,183 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+plink2gt
+
+=head1 SYNOPSIS
+
+ plink2gt [options] <ped-file> -m <bim-file>
+
+  -h         help
+  -b         plink bim file               
+  -o         output file name (optional)
+             default: replaces extension of 
+             <ped-file>	with gt
+  ped-file   plink pedigree file
+       
+ example: plink2gt -o pscalare.gt plink.ped -m plink.bim
+       
+ Converts the affymetrix calls output file to a gt-file.
+       
+=head1 DESCRIPTION
+
+=cut
+
+my $help;
+my $outFile;
+my $pedFile;
+my $gtFile;
+my $mkFile;
+my $saFile;
+my $bimFile;
+my $headerProcessed = 0;
+my $colNo;
+my @SNP;
+my %SNP;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'o=s'=>\$outFile, 'b=s'=>\$bimFile) || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$pedFile = $ARGV[0];
+
+if (!defined($outFile))
+{
+    my ($name, $path, $ext) = fileparse($pedFile, '\..*');
+	$gtFile = "$name.gt";
+	$mkFile = "$name.mk";
+	$saFile = "$name.sa";
+}
+else
+{
+    $gtFile = "$outFile.gt";
+	$mkFile = "$outFile.mk";
+	$saFile = "$outFile.sa";
+}
+
+open(BIM, $bimFile) || die "Cannot open $bimFile\n";
+open(MK, ">$mkFile") || die "Cannot open $mkFile\n";
+
+print MK "snp-id\tchromosome\tposition\talleles\n";
+    
+while(<BIM>)
+{
+    s/\r?\n?$//;
+    
+    my @fields = split(/\s+/, $_);
+    
+    my $chromosome = $fields[0];
+    if ($chromosome =~ /^(23|X)$/)
+    {
+        $chromosome = 'X';
+    }
+    elsif ($chromosome =~ /^(24|Y)$/)
+    {
+        $chromosome = 'Y';
+    }
+    elsif ($chromosome =~ /^(25|XY)$/)
+    {
+        $chromosome = 'XY';
+    }
+    elsif ($chromosome =~ /^(26|MT)$/)
+    {
+        $chromosome = 'M';
+    }
+    elsif ($chromosome =~ /^0$/)
+    {
+        $chromosome = 'n/a';
+    }
+    
+    my $snpID = $fields[1];
+    my $position = $fields[3];
+    if ($chromosome eq 'n/a')
+    {
+        $position = 'n/a';
+    }
+    my $alleles = $fields[4];
+    if (exists($fields[5]))
+    {
+        $alleles .= "/$fields[5]";     
+    }
+    
+    if ($fields[4] eq '0' || $fields[5] eq '0')
+    {
+        warn "$snpID lacks allele information";
+    }
+    
+    push(@SNP, $snpID);
+    $SNP{$snpID}{"$fields[4]$fields[4]"} = 0;
+    $SNP{$snpID}{"$fields[4]$fields[5]"} = 1;
+    $SNP{$snpID}{"$fields[5]$fields[5]"} = 2;
+    
+    print MK "$snpID\t$chromosome\t$position\t$alleles\n";
+}
+close(BIM);
+close(MK);
+
+open(PED, $pedFile) || die "Cannot open $pedFile\n";
+open(GT, ">$gtFile") || die "Cannot open $gtFile\n";
+open(SA, ">$saFile") || die "Cannot open $saFile\n";
+
+print GT "sample-id";
+map {print GT "\t$_"} @SNP;
+print GT "\n";
+print SA "sample-id\tfamily-id\tpaternal-id\tmaternal-id\tsex\taffection\n";
+
+while (<PED>)
+{
+	s/\r?\n?$//;
+
+	my @fields = split(/\s+/);
+	
+	my $sampleID = $fields[1];
+	my $familyID = $fields[0] eq '0' ? 'n/a' : $fields[0];					
+	my $paternalID = $fields[2]==0 ? 'n/a' : $fields[2];	
+	my $maternalID = $fields[3]==0 ? 'n/a' : $fields[3];	
+	my $sex = $fields[4]==1 ? 'male' : $fields[4]==2 ? 'female' : 'n/a';
+	my $affection = $fields[5]==1 ? 'control' : $fields[5]==2 ? 'case' : 'n/a';	
+	
+	#handle sample annotation file					
+	print SA "$sampleID\t$familyID\t$paternalID\t$maternalID\t$sex\t$affection\n";
+		
+    #handle genotype file
+	print GT "$sampleID";
+		
+	for (my $col=6; $col<@fields; $col = $col+2)  
+	{
+		if($fields[$col] eq '0' || $fields[$col+1] eq '0')
+		{
+			print GT "\t-1";
+		}
+		else
+		{
+		    my $snpID = $SNP[($col-6)>>1];
+		    my $genotype = $fields[$col] . $fields[$col+1];
+		    print GT "\t$SNP{$snpID}{$genotype}";
+		}
+	}
+		
+	print GT "\n";
+}
+
+close(GT);
+close(PED);
+close(SA);

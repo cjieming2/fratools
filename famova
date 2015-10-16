@@ -1,0 +1,602 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use Pod::Usage;
+use File::Basename;
+use Switch;
+
+=head1 NAME
+
+famova
+
+=head1 SYNOPSIS
+
+ famova [options] -m mk-file -s sa-file tg-file
+    
+  -m        marker annotation file
+            a)marker_id
+            b)alleles
+  -s        sample annotation file
+            a)sample_id
+  -l1       first level of hierarchy
+  -l2       second level of hierarchy
+            
+  tg-file   tg file
+  
+ example: famova -m pscalare.mk -s pscalare.sa --l1 population_id --l2 region1  pscalare.tg 
+    
+ Converts tg file to AB format for Exemplar import.
+       
+=head1 DESCRIPTION
+ 
+=cut
+
+#option variables
+my $help;
+my $mkFile;
+my $tgFile;
+my $outFile;
+my %MARKER;
+my $colNo;
+my %label2Column;
+my $headerProcessed;
+my %SAMPLE;
+my $saFile;
+my $level1;
+my $level2;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'm=s'=>\$mkFile, 's=s'=>\$saFile, 'l1=s'=>\$level1, 'l2=s'=>\$level2)
+   || !defined($mkFile)
+   || !defined($saFile)
+   || !defined($level1)
+   || !defined($level2)
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$tgFile = $ARGV[0];
+
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('marker_id', 'alleles')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $mkFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        
+        my $marker = $fields[$label2Column{'marker_id'}];
+        my $alleles = $fields[$label2Column{'alleles'}];       
+        my @alleles = split('/', $alleles);
+        
+        $MARKER{$marker} = scalar(@alleles);
+    }
+}
+close(MK);
+
+open(SA, $saFile) || die "Cannot open $saFile";
+$headerProcessed = 0;
+while(<SA>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('sample_id', $level1, $level2)
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $saFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        
+        my $sampleID = $fields[$label2Column{'sample_id'}];
+		my $population = $fields[$label2Column{$level1}];
+		my $region = $fields[$label2Column{$level2}];
+			
+    	$SAMPLE{$sampleID}{LEVEL1} = $population;
+    	$SAMPLE{$sampleID}{LEVEL2} = $region;   	
+    }
+}
+close(SA);
+
+open(TG, "$tgFile") || die "Cannot open $tgFile\n";
+$headerProcessed = 0;
+if(!defined($outFile))  
+{
+  my ($name, $path, $ext) = fileparse($tgFile, '\..*');
+  $outFile = "amova-$level1-$level2-$name.mk";
+}
+open(AMOVA, ">$outFile") || die "Cannot open $outFile\n";
+print AMOVA "marker_id\tsigmaG\tsigmaI\tsigmaS\tsigmaP\tpsigmaI\tpsigmaS\tpsigmaP\n"; 
+
+my @HIERARCHY;
+
+while (<TG>)
+{
+    s/\r?\n?$//;
+   
+    if(!$headerProcessed)
+    {
+        #counts number of columns
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        my %HIERARCHY;
+        
+        #add individuals to pertinent populations
+        for my $i (1..$#fields)
+        {
+        	my $sampleID = $fields[$i];
+
+        	if(exists($SAMPLE{$sampleID}))
+        	{
+	        	if(!exists($HIERARCHY{$SAMPLE{$sampleID}{LEVEL2}}{$SAMPLE{$sampleID}{LEVEL1}}))
+	        	{
+	        		$HIERARCHY{$SAMPLE{$sampleID}{LEVEL2}}{$SAMPLE{$sampleID}{LEVEL1}} = ();
+	        	}
+	   			
+	        	push(@{$HIERARCHY{$SAMPLE{$sampleID}{LEVEL2}}{$SAMPLE{$sampleID}{LEVEL1}}}, $i);
+        	}
+        	#print "adding $SAMPLE{$sampleID}{LEVEL2} $SAMPLE{$sampleID}{LEVEL1} $i\n";
+        }        
+
+        my @level2 = keys(%HIERARCHY);
+      
+        for my $i (0..$#level2)
+        {
+        	my @level1 = keys(%{$HIERARCHY{$level2[$i]}});
+        
+	        for my $j (0..$#level1)
+	        {
+	        	$HIERARCHY[$i][$j] = $HIERARCHY{$level2[$i]}{$level1[$j]}; 	        	
+	        }
+        }
+	    $headerProcessed = 1;
+    }
+    else
+    {
+    	my $sigmaP;
+	    my $sigmaS;
+	    my $sigmaI;
+	    my $sigmaG;
+    	my $psigmaP;
+	    my $psigmaS;
+	    my $psigmaI;
+	    	        
+        my @fields = split('\t', $_, $colNo);
+    	my $markerID = $fields[0];
+        
+        if($MARKER{$markerID}==2)
+        {
+        	my @h = ();
+        	my @p = ();
+	        my @P = ();
+	        my $P = 0;
+	        my @n = ();
+	        my @N = ();
+	        my $N = 0;
+	        #number of regions
+	        my $r = scalar(@HIERARCHY);
+	        #number of sub populations
+	        my @s = ();
+	        my $s = 0;
+	        
+	        #get P first
+         	my $tempP = 0;
+        	my $tempN = 0;
+	        for my $i (1..$#fields)
+	        {
+	        	if($fields[$i]!=-1)
+		        {
+		       		$tempP += $fields[$i];
+	       		    $tempN += 2;
+		    	}
+	        }
+	        
+	       	if ($tempN==0)
+	    	{
+	    		next;
+        	}
+        	else
+        	{
+        		$P = $tempP/$tempN;
+        	}
+	        	
+	        if ($P==0 || $P==1)
+	        {
+	        	next;
+	        }
+	
+	        #iterate through populations
+	        for my $i (0 .. ($r-1))
+	        {
+	        	#iterate through sub populations
+	        	$s[$i] = $#{$HIERARCHY[$i]} + 1;
+	        	$s += $s[$i];
+	        	for my $j (0 .. ($s[$i]-1))
+		        {
+		        	#population, calculate pij
+		        	$p[$i][$j] = 0;
+		        	$h[$i][$j] = 0;
+		        	$n[$i][$j] = 0;	        	
+		       		for my $k (@{$HIERARCHY[$i][$j]})
+		       		{
+		       			#estimate sub population allele frequencies
+		       			if($fields[$k]!=-1)
+		       			{
+		       				$h[$i][$j] += $fields[$k]==1?1:0;
+		       				$p[$i][$j] += $fields[$k];
+	       				    $n[$i][$j] += 2;
+		       			}
+		       		}
+	       			
+	       			if($n[$i][$j]==0)
+	       			{
+	       				$p[$i][$j] = $P;
+	       				$n[$i][$j] = 1;
+	       				$h[$i][$j] = 0;
+	       			}
+	       			else
+	       			{
+	       				$p[$i][$j] = $p[$i][$j]/$n[$i][$j];
+	       				$n[$i][$j] = $n[$i][$j]/2;
+	       				$h[$i][$j] = $h[$i][$j]/$n[$i][$j];
+	       			}
+		       		
+		       		$N[$i] += $n[$i][$j];
+		       		$P[$i] += $n[$i][$j]*$p[$i][$j];
+		        }
+		        
+		        $P[$i] = $P[$i]/$N[$i];
+		        $N += $N[$i]; 
+	        }
+	        
+	        #iterate through populations
+			if(0)
+			{
+		        print "R = $r\n";
+	        	print "S = $s\n";
+		        print "P = $P\n";
+	        	print "N = $N\n";
+		        for my $i (0 .. ($r-1))
+		        {	        	
+		        	print "\tP$i = $P[$i]\n";
+		        	print "\tN$i = $N[$i]\n";
+		        	print "\tS$i = $s[$i]\n";
+		        	for my $j (0 .. ($s[$i]-1))
+			        {
+			        	print "\t\tp$i$j = $p[$i][$j]\n";
+			        	print "\t\th$i$j = $h[$i][$j]\n";
+			        	print "\t\tn$i$j = $n[$i][$j]\n";
+			        } 
+			        
+		        }
+	    	}
+	        #compute ncx and SS
+	        my $nc1 = 0;
+	        my $nc2 = 0;
+	        my $nc3 = 0;
+	        my $MSP = 0;
+	        my $MSS = 0;
+	        my $MSI = 0;
+	        my $MSG = 0;
+	        	       	        	        
+	        #iterate through populations
+	        for my $i (0 .. ($r-1))
+	        {
+	        	#print "$i\n"; 
+	        	for my $j (0 .. ($s[$i]-1))
+		        {
+		        	$nc1 += ($N-$N[$i])*($n[$i][$j]**2)/($N[$i]*$N);
+	        	 	#print "\t$j)nc3 $nc3\n";
+		        	$nc3 += ($n[$i][$j]**2)/$N[$i];
+		        	$MSS += $n[$i][$j]*(($p[$i][$j]-$P[$i])**2);
+		        	$MSI += $n[$i][$j]*($p[$i][$j]*(1-$p[$i][$j])-$h[$i][$j]/4);
+		 			$MSG += $n[$i][$j]*$h[$i][$j];
+		        } 
+		        $nc2 += $N[$i]**2;
+		        
+	        	$MSP += $N[$i]*(($P[$i]-$P)**2);
+	        }
+	        
+	        $nc1 /= $r-1; 
+	        $nc2 = ($N-$nc2/$N)/($r-1);
+	        $nc3 = ($N-$nc3)/($s-$r);
+	        $MSP = $MSP * 2 / ($r-1);
+	        $MSS = $MSS * 2 / ($s-$r);
+	        $MSI = $MSI * 2 / ($N-$s);
+	        $MSG =  $MSG/(2*$N);
+	                
+	        #compute variance components
+        	$sigmaG = $MSG;
+	        $sigmaI = ($MSI-$MSG)/2;
+	        $sigmaI = $sigmaI<0?0:$sigmaI;
+	        $sigmaS = ($MSS-$MSI)/(2*$nc3);
+	        $sigmaS = $sigmaS<0?0:$sigmaS;
+	        $sigmaP = ($MSP-$MSI-2*$nc1*$sigmaS)/(2*$nc2);
+	        $sigmaP = $sigmaP<0?0:$sigmaP;
+	        #accounting for the other allele.
+	        $sigmaG *= 2;
+	        $sigmaI *= 2;
+	        $sigmaS *= 2;
+	        $sigmaP *= 2;
+	        my $totalVariance = $sigmaG + $sigmaI + $sigmaS + $sigmaP;
+	        $psigmaI = ($sigmaI+$sigmaG) / $totalVariance * 100;
+	        $psigmaS = $sigmaS / $totalVariance * 100;
+	        $psigmaP = $sigmaP / $totalVariance * 100;
+
+			printf AMOVA "%s\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\n",
+		   				$markerID, $sigmaG, $sigmaI, $sigmaS, $sigmaP, $psigmaI, $psigmaS, $psigmaP; 
+	        
+        }
+        else
+        {
+        	my $totalSigmaP = 0;
+	    	my $totalSigmaS = 0;
+	    	my $totalSigmaI = 0;
+	    	my $totalSigmaG = 0;
+	    
+        	my $alleleCount = $MARKER{$markerID};
+        	for my $currentAllele (0..($alleleCount-1))
+        	{
+	        	my @h = ();
+	        	my @p = ();
+		        my @P = ();
+		        my $P = 0;
+		        my @n = ();
+		        my @N = ();
+		        my $N = 0;
+		        #number of regions
+		        my $r = scalar(@HIERARCHY);
+		        #number of sub populations
+		        my @s = ();
+		        my $s = 0;
+		        
+		        #get P first
+	         	my $tempP = 0;
+	        	my $tempN = 0;
+		        for my $i (1..$#fields)
+		        {
+		        	my @alleles = split("/", $fields[$i]);
+
+		        	if($alleles[0]!=-1)
+			        {
+			        	if($alleles[0]==$currentAllele)
+			        	{
+				       		$tempP += 1;
+			    		}
+			    		$tempN += 1;
+			    	}
+		        	if($alleles[1]!=-1)
+			        {
+			        	if($alleles[1]==$currentAllele)
+			        	{
+				       		$tempP += 1;
+			    		}
+			    		$tempN += 1;
+			    	}
+		        }
+		        
+		        if ($tempN==0)
+		    	{
+		    		next;
+	        	}
+	        	else
+	        	{
+	        		$P = $tempP/$tempN;
+	        	}
+		        
+		        if ($P==0 || $P==1)
+		        {
+		        	next;
+		        }
+		        
+		        #iterate through populations
+		        for my $i (0 .. ($r-1))
+		        {
+		        	#iterate through sub populations
+		        	$s[$i] = $#{$HIERARCHY[$i]} + 1;
+		        	$s += $s[$i];
+		        	for my $j (0 .. ($s[$i]-1))
+			        {
+			        	#population, calculate pij
+			        	$p[$i][$j] = 0;
+			        	$h[$i][$j] = 0;
+			        	$n[$i][$j] = 0;	        	
+			       		for my $k (@{$HIERARCHY[$i][$j]})
+			       		{
+			       			my @alleles = split("/", $fields[$k]);
+			       			#print "alleles @alleles\n";
+			       			#exit;
+			       			my $hetIndicator = 0;
+				        	if($alleles[0]!=-1)
+					        {
+					        	if($alleles[0]==$currentAllele)
+					        	{
+						       		$hetIndicator = 1;
+						       		$p[$i][$j] += 1;
+					    		}
+					    		$n[$i][$j] += 1;
+					    	}
+				        	if($alleles[1]!=-1)
+					        {
+					        	if($alleles[1]==$currentAllele)
+					        	{
+					        		$hetIndicator = $hetIndicator==1? 0: 1;
+						       		$p[$i][$j] += 1;
+					    		}
+					    		$n[$i][$j] += 1;
+					    	}
+			       			
+			       			$h[$i][$j] += $hetIndicator;
+			       		}
+		       			
+		       			if($n[$i][$j]==0)
+		       			{
+		       				$p[$i][$j] = $P;
+		       				$n[$i][$j] = 1;
+		       				$h[$i][$j] = 0;
+		       			}
+		       			else
+		       			{
+		       				$p[$i][$j] = $p[$i][$j]/$n[$i][$j];
+		       				$n[$i][$j] = $n[$i][$j]/2;
+		       				$h[$i][$j] = $h[$i][$j]/$n[$i][$j];
+		       			}
+			       		
+			       		$N[$i] += $n[$i][$j];
+			       		$P[$i] += $n[$i][$j]*$p[$i][$j];
+			        }
+			        
+			        $P[$i] = $P[$i]/$N[$i];
+			        $N += $N[$i]; 
+		        }
+		        
+		        #iterate through populations
+				if(0)
+				{
+			        print "R = $r\n";
+		        	print "S = $s\n";
+			        print "P = $P\n";
+		        	print "N = $N\n";
+			        for my $i (0 .. ($r-1))
+			        {	        	
+			        	print "\tP$i = $P[$i]\n";
+			        	print "\tN$i = $N[$i]\n";
+			        	print "\tS$i = $s[$i]\n";
+			        	for my $j (0 .. ($s[$i]-1))
+				        {
+				        	print "\t\tp$i$j = $p[$i][$j]\n";
+				        	print "\t\th$i$j = $h[$i][$j]\n";
+				        	print "\t\tn$i$j = $n[$i][$j]\n";
+				        } 
+				        
+			        }
+		    	}
+		    	
+		        #compute ncx and SS
+		        my $nc1 = 0;
+		        my $nc2 = 0;
+		        my $nc3 = 0;
+		        my $MSP = 0;
+		        my $MSS = 0;
+		        my $MSI = 0;
+		        my $MSG = 0;
+		       
+		           	        	        
+		        #iterate through populations
+		        for my $i (0 .. ($r-1))
+		        {
+		        	#print "$i\n"; 
+		        	for my $j (0 .. ($s[$i]-1))
+			        {
+			        	$nc1 += ($N-$N[$i])*($n[$i][$j]**2)/($N[$i]*$N);
+		        	 	#print "\t$j)nc3 $nc3\n";
+			        	$nc3 += ($n[$i][$j]**2)/$N[$i];
+			        	$MSS += $n[$i][$j]*(($p[$i][$j]-$P[$i])**2);
+			        	$MSI += $n[$i][$j]*($p[$i][$j]*(1-$p[$i][$j])-$h[$i][$j]/4);
+			 			$MSG += $n[$i][$j]*$h[$i][$j];
+			        } 
+			        $nc2 += $N[$i]**2;
+			        
+		        	$MSP += $N[$i]*(($P[$i]-$P)**2);
+		        }
+		        
+		        $nc1 /= $r-1; 
+		        $nc2 = ($N-$nc2/$N)/($r-1);
+		        $nc3 = ($N-$nc3)/($s-$r);
+		        $MSP = $MSP * 2 / ($r-1);
+		        $MSS = $MSS * 2 / ($s-$r);
+		        $MSI = $MSI * 2 / ($N-$s);
+		        $MSG =  $MSG/(2*$N);
+		                
+		        #compute variance components
+		        $sigmaG = $MSG;
+		        $sigmaI = ($MSI-$MSG)/2;
+		        $sigmaI = $sigmaI<0?0:$sigmaI;
+		        $sigmaS = ($MSS-$MSI)/(2*$nc3);
+		        $sigmaS = $sigmaS<0?0:$sigmaS;
+		        $sigmaP = ($MSP-$MSI-2*$nc1*$sigmaS)/(2*$nc2);
+		        $sigmaP = $sigmaP<0?0:$sigmaP;
+		        
+		        if(0)
+		        {
+			        print "allele $currentAllele : \n";
+			        print "\tsigmaP : $sigmaP\n";
+			        print "\tsigmaS : $sigmaS\n";
+			        print "\tsigmaI : $sigmaI\n";
+			        print "\tsigmaG : $sigmaG\n";
+			    }
+		        
+	        	$totalSigmaP += $sigmaP;
+		    	$totalSigmaS += $sigmaS;
+		    	$totalSigmaI += $sigmaI;
+		    	$totalSigmaG += $sigmaG;        
+	    	}
+	    	my $totalVariance = $totalSigmaG + $totalSigmaI + $totalSigmaS + $totalSigmaP;
+		    $psigmaI = ($totalSigmaI+$totalSigmaG) / $totalVariance * 100;
+		    $psigmaS = $totalSigmaS / $totalVariance * 100;
+		    $psigmaP = $totalSigmaP / $totalVariance * 100;
+                
+			printf AMOVA "%s\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\n",
+		   				$markerID, $totalSigmaG, $totalSigmaI, $totalSigmaS, $totalSigmaP, $psigmaI, $psigmaS, $psigmaP; 
+        }  
+    }
+}
+
+close(AMOVA);
+close(TG);

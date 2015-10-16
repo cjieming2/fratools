@@ -1,0 +1,63 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+$|=1;
+
+#my @populations = ("A", "B", "C", "D", "E", "F");
+my $N = 126;
+my $R = 3;
+my @populations;
+for (1 .. $N)
+{
+	push(@populations, $_);
+}
+
+my @sets = combinations($N, $R, @populations);
+
+my $expectedNo = ncr($N, $R);
+print "sets: " . @sets . " combinations (expected is $expectedNo)\n" . join("\n", @sets) . "\n";
+
+sub ncr
+{
+	my $n = shift;
+	my $r = shift;
+
+    if($r==1)
+    {
+       return $n;
+    }
+    elsif ($n==$r)
+    {
+       return 1;
+    }
+    else
+    {
+       return ncr($n-1, $r) + ncr($n-1,$r-1);
+    }
+}
+
+sub combinations
+{
+	my $n = shift;
+	my $r = shift;
+	my @pop = @_;
+	
+	#print "n= $n\n";
+	#print "r= $r\n";
+	#print "pop = @pop\n";
+
+    if($r==1)
+    {
+       return @pop;
+    }
+    elsif ($n==$r)
+    {
+       return (join(",", @pop));
+    }
+    else
+    {
+       my $firstPop = shift(@pop);
+       return (combinations($n-1, $r, @pop), map{join(",", $firstPop, $_)} combinations($n-1, $r-1, @pop)) ;
+    }
+}

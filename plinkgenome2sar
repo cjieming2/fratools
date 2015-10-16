@@ -1,0 +1,183 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX;
+
+=head1 NAME
+
+plinkgenome2sar
+
+=head1 SYNOPSIS
+
+ plinkgenome2sar [options] plink.genome 
+
+  -h           help
+  -c           ibd proportion cutoff [>=] (default: 0.00)
+  plink.genome file
+ 
+ example: plinkgenome2sar plink.genome
+         
+ Extracts relative pairs from plink.genome and annotates the relationship 
+ based on the relationship that generates the least residual sum of squares
+ when fitted on the 3 expected IBD probability values of each possible
+ relationship.  The pairs considered are those who's ibd proportion is 
+ above the defined cutoff which is 0.0 by default.
+ 
+                                  Z0      Z1      Z2    ibd-proportion
+ Monozygote Twins           MZ     0       0       1      1
+ Parent-Offspring           PO     0       1       0    1/2
+ Full Sibling               FS   1/4     1/2     1/4    1/2
+ Avuncular Pair             AV   1/2     1/2       0    1/4
+ Half Sibling               HS   1/2     1/2       0    1/4
+ Double First Cousins       DC  9/16    6/16    1/16    1/4 (not computed)
+ First Cousins              CO   3/4     1/4       0    1/8
+ Grandparent-Grandchild     GG   3/4     1/4       0    1/8
+ Unknown Relationship 1     R1     0     1/2     1/2    3/4
+ Unknown Relationship 2     R2     0     3/4     1/4    5/8
+ Unknown Relationship 3     R3   1/8     3/4     1/8    1/2
+ Unrelated                  UN     1       0       0      0
+ 
+ It will be convenient to use fselect to outer join relpair and plink results:
+ fselect a.sample-pair-id, a.sample-id-1, a.sample-id-2, a.relationship, a.frequency, 
+         b.relationship, b.z0, b.z1, b.z2, b.ibd-proportion, b.similarity, b.rss 
+         from pscalare.sar outer join paltum.sar where a.sample-pair-id=b.sample-pair-id
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $colNo;
+my %label2Column;
+
+#data structures
+my $plinkGenomeFile;
+my $headerProcessed;
+my $sarFile;
+my $ibdProportionCutoff = 0.00;
+my %SAMPLE;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'c=f'=>\$ibdProportionCutoff) 
+   || ($ibdProportionCutoff < 0 || $ibdProportionCutoff > 1) 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$plinkGenomeFile = $ARGV[0];
+
+my %E_Z;
+
+@{$E_Z{MZ}} = (0, 0, 1);
+@{$E_Z{PO}} = (0, 1, 0);
+@{$E_Z{FS}} = (0.25, 0.5, 0.25);
+@{$E_Z{AV_HS}} = (0.5, 0.5, 0);
+#@{$E_Z{DC}} = (0.5625, 0.375, 0.0625);
+@{$E_Z{CO_GG}} = (0.75, 0.25, 0);       
+@{$E_Z{UN}} = (1, 0, 0);  
+@{$E_Z{R1}} = (0, 0.5, 0.5);
+@{$E_Z{R2}} = (0, 0.75, 0.25);
+@{$E_Z{R3}} = (0.125, 0.75, 0.125);
+
+my %RSS;;
+
+my @relationships = keys(%E_Z);
+    
+if(!defined($sarFile))
+{
+    my ($name, $path, $ext) = fileparse($plinkGenomeFile, '\..*');
+    $sarFile = "$name.sar";
+}
+
+open(SAR, ">$sarFile") || die "Cannot open $sarFile";
+
+#read sample annotation
+open(PLINK_GENOME_FILE, $plinkGenomeFile) || die "Cannot open $plinkGenomeFile";
+$headerProcessed = 0;
+while(<PLINK_GENOME_FILE>)
+{
+    s/\r?\n?$//;
+    $_=~s/^\s+//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\s+/\t/g + 1;
+        
+        my @fields = split(/\t/, $_, $colNo);
+         
+        SEARCH_LABEL: for my $label ('IID1', 'IID2', 'Z0', 'Z1', 'Z2', 'IBS0', 'IBS1', 'IBS2', 'DST', 'PI_HAT')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                { 
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $plinkGenomeFile";
+        }
+        
+        print SAR "sample-pair-id\tsample-id-1\tsample-id-2\tibs0\tibs1\tibs2\tz0\tz1\tz2\tibd-proportion\trelationship\tsimilarity\tibs-mean\tibs-stdev\trss\n";
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split(/\s+/, $_, $colNo);
+        my $sample1ID = $fields[$label2Column{'IID1'}];
+        my $sample2ID = $fields[$label2Column{'IID2'}];
+        my @Z = ($fields[$label2Column{'Z0'}], $fields[$label2Column{'Z1'}], $fields[$label2Column{'Z2'}]);
+        my $ibdProportion = $Z[2] + $Z[1]/2;
+        my $ibs0 = $fields[$label2Column{'IBS0'}];
+        my $ibs1 = $fields[$label2Column{'IBS1'}];
+        my $ibs2 = $fields[$label2Column{'IBS2'}];
+        my $similarity = $fields[$label2Column{'DST'}];
+        
+        push(@{$SAMPLE{$sample1ID}}, $similarity);
+        push(@{$SAMPLE{$sample2ID}}, $similarity);
+        
+        if ($ibdProportion >= $ibdProportionCutoff)
+        {
+            my $mostProbableRelationship = "UN";
+            my $smallestRSS = FLT_MAX;
+            for my $relationship (@relationships)
+            {
+                $RSS{$relationship} = ($Z[0]-$E_Z{$relationship}[0])**2 +
+                                      ($Z[1]-$E_Z{$relationship}[1])**2 +
+                                      ($Z[2]-$E_Z{$relationship}[2])**2;
+                
+                if($RSS{$relationship} < $smallestRSS)
+                {
+                    $smallestRSS = $RSS{$relationship};
+                    $mostProbableRelationship = $relationship;
+                }               
+            }           
+
+            my $mean = ($ibs1*1 + $ibs2*2)/($ibs0 + $ibs1 + $ibs2);
+            my $variance = (((0-$mean)**2 * $ibs0) + ((1-$mean)**2 * $ibs1) + ((2-$mean)**2 * $ibs2)) / ($ibs0 + $ibs1 + $ibs2 - 1);
+            my $stdev = sqrt($variance);
+            
+            print SAR join('/', sort(($sample1ID, $sample2ID))). "\t$sample1ID\t$sample2ID\t$ibs0\t$ibs1\t$ibs2\t$Z[0]\t$Z[1]\t$Z[2]\t$ibdProportion\t$mostProbableRelationship\t$similarity\t$mean\t$stdev\t$smallestRSS\n";
+        } 
+    }
+}
+close(PLINK_GENOME_FILE);
+close(SAR);

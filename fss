@@ -1,0 +1,144 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+fss
+
+=head1 SYNOPSIS
+
+ fss [options] <gt-file>	
+
+  -h       help
+  -s       number of sub samples to be generated
+  -n       size of sub sample
+  -p       pseudo bootstrap (default is off)
+  -d       minimum intermarker distance
+  gt-file  gt-file
+  
+  example: fss -s 100 -n 20 pscalare.gt
+           fss -s 1 -n 10 pscalare.gt
+           fss -s 1 -n 10 -p pscalare.gt
+
+  Samples from a gt-file.
+  Subsamples are named s<no>-<gt-file>.
+  Pseudo bootstrap allows subsamples to have overlap SNPs.
+  
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $verbose;
+my $debug;
+my $help;
+my $sampleNo;
+my $sampleSize;
+my $pseudoBootstrap;
+my $gtFile;
+my $outFile;
+my $headerProcessed;
+my %label2Column;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help,
+                's=i'=>\$sampleNo, 
+                'n=i'=>\$sampleSize, 
+                'p'=>\$pseudoBootstrap)
+	|| !defined($sampleNo) 
+	|| !defined($sampleSize) 
+	|| $sampleSize<1 
+	|| $sampleNo<1
+	|| scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$gtFile = $ARGV[0];
+
+#checks validity of genotype file
+#isGt($gtFile) || die "$gtFile not a gt-file";
+
+my $colNo;
+my $colElementNo;
+
+#counts number of columns and column elements
+open(IN, $gtFile) || die "Cannot open $gtFile";
+
+$_ = <IN>;	
+s/\r?\n?$//;
+$colNo = s/\t/\t/g + 1;
+$colElementNo = $colNo-1;
+
+close(IN);
+
+#checks if you can indeed sample s samples of size n from the genotype file
+if((!$pseudoBootstrap && $sampleSize*$sampleNo>$colElementNo) || ($pseudoBootstrap && $sampleNo>$colElementNo)) 
+{
+	die "You cannot sample $sampleNo samples of size $sampleSize from $colElementNo elements";
+}
+
+#subsamples the elements
+my @SELECTED_COLUMNS;
+my @COL_ELEMENTS = (1 .. $colElementNo);
+for my $i (1 .. $sampleSize*$sampleNo)
+{
+	my $selectedIndex = rand(scalar(@COL_ELEMENTS));
+	push (@SELECTED_COLUMNS, $COL_ELEMENTS[$selectedIndex]);
+	splice(@COL_ELEMENTS, $selectedIndex, 1);
+	
+	#adds back all the samples
+	if ($pseudoBootstrap && $i%$sampleSize==0)
+	{
+		@COL_ELEMENTS = (1 .. $colElementNo);
+	}
+}
+
+#prints out subsamples
+my @FH;
+my ($name, $dir, $ext) = fileparse($gtFile, '\..*');
+$outFile = "$name$ext";
+for my $i (1..$sampleNo)
+{
+	open($FH[$i-1], ">s$i-$outFile") || die "Cannot open s$i-$outFile";
+}
+
+open(IN, $gtFile) || die "Cannot open $gtFile";
+while(<IN>)
+{
+	s/\r?\n?$//;
+	my @fields = split('\t', $_, $colNo);
+	
+	for my $i (0 .. $#FH)
+	{
+		print {$FH[$i]} "$fields[0]";
+		
+		for my $j ($i*$sampleSize .. ($i+1)*$sampleSize-1)
+		{
+			print {$FH[$i]} "\t$fields[$SELECTED_COLUMNS[$j]]";
+		}
+		
+		print {$FH[$i]} "\n";
+	}
+}
+close(IN);
+
+for my $i (0 .. $#FH)
+{
+	close($FH[$i]);
+}

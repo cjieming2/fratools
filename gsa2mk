@@ -1,0 +1,151 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+gsa2mk
+
+=head1 SYNOPSIS
+
+ gsa2mk [options] genotype-file
+	
+ -v verbose
+ -d debug
+ -i includes Sanger MHC Haplotype Project annotations (default is does not include)
+    /c6_(COX|QBL|PGF|APD|DBB|MANN|SSTO|MCF)/
+
+ example: gsa2mk pscalare.txt
+
+ Converts GISSNP annotation (tab delimited) to mk format.
+ Output file is named <gissnp-annotation-filename> with its extension renamed to .mk
+ Please note that this programme does not check for correctness of the field values.
+
+ The extracted fields followed by its new name are:
+ 1)Query ID        snp-id
+ 2)Chr             chromosome
+ 3)Chr Location    position
+ 4)Alleles         alleles
+ 5)Genes           genes
+ 6)Consequence     consequences  
+       
+=head1 DESCRIPTION
+
+=cut
+
+my $help;
+my $gissnpAnnotationFile;
+my $mkFile;
+my $includeMHCHaplotype;
+my $colNo;
+my %anno2col;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'i'=>\$includeMHCHaplotype) || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$gissnpAnnotationFile = $ARGV[0];
+
+#reads in the GISSNP illumina annotation
+open(GISSNP_ANNOTATION, $gissnpAnnotationFile) || die "Cannot open $gissnpAnnotationFile\n";
+
+my ($name, $path, $ext) = fileparse($gissnpAnnotationFile, '\..*');
+$mkFile = "$name.mk";
+open(MK, ">$mkFile") || die "Cannot open $mkFile\n";
+
+while (<GISSNP_ANNOTATION>)
+{
+	s/\r?\n?$//;
+
+	if($.==1)
+	{
+		print MK "snp-id\tchromosome\tposition\talleles\tgene\tconsequence\n";
+		
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		SEARCH_LABEL: for my $label ('Query ID', 'Chr', 'Chr Location', 'Alleles', 'Genes', 'Consequence')
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $label)
+				{			
+					$anno2col{$label}=$col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			die "Cannot find '$label' in $mkFile";
+		}
+	}
+	else
+	{	
+		my @fields = split('\t', $_, 13);
+		
+		my $snpId = trim($fields[$anno2col{'Query ID'}]);
+		my $chromosome = trim($fields[$anno2col{'Chr'}]);
+		my $position = trim($fields[$anno2col{'Chr Location'}]);
+		my $alleles = trim($fields[$anno2col{'Alleles'}]);
+		my $genes = trim($fields[$anno2col{'Genes'}]);
+		my $consequences = trim($fields[$anno2col{'Consequence'}]);
+		
+		#skip Sanger MHC Haplotype Project annotations
+		if(!$includeMHCHaplotype && $chromosome=~/^c6_/)
+		{
+			next;
+		}
+				
+		#clean up genes entry
+		$genes =~ s/^["\s]*//;
+		$genes =~ s/["\s]*$//;
+		my @genes = split(",", $genes);
+		my @distinctGenes;
+		my %GENES;
+		
+		#clean up consequence entry
+		$consequences =~ s/^["\s]*//;
+		$consequences =~ s/["\s]*$//;
+		my @consequences = split(",", $consequences);
+		my @distinctConsequences;
+		my %CONSEQUENCES;
+		
+		for my $i (0 .. $#genes)
+		{
+			my $gene = trim($genes[$i]);
+			my $consequence =  trim($consequences[$i]);
+			
+			if(!exists($GENES{$gene}))
+			{
+				$GENES{$gene} = 1;
+				$CONSEQUENCES{$consequence} = 1;
+				push(@distinctGenes, $gene);
+				push(@distinctConsequences, $consequence);
+			}
+		}
+		
+		$genes = join(", ", @distinctGenes);
+		$consequences = join(", ", @distinctConsequences);
+
+		printf MK "$snpId\t$chromosome\t$position\t$alleles\t$genes\t$consequences\n";
+	}
+}
+
+close(GISSNP_ANNOTATION);
+close(MK);

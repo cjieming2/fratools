@@ -1,0 +1,82 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+fxtract
+
+=head1 SYNOPSIS
+
+ fxtract [options] genotype-file
+  -h  help
+    
+ example: fxtract pscalare.gt
+          fxtract pscalare.tg
+          
+ Extracts sample-ids and snp-ids from a gt or tg file.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $genotypeFile;
+my $genotypeSkeletonFile;
+my $headerProcessed;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help) || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$genotypeFile = $ARGV[0];
+isGtOrTg($genotypeFile) || die "$genotypeFile not a genotype file";
+
+if(!defined($genotypeSkeletonFile))
+{
+	my($name, $path, $ext) = fileparse($genotypeFile, '\..*');
+	$genotypeSkeletonFile = "$name$ext" . "s";
+}
+
+open(GENO_SKELETON, ">$genotypeSkeletonFile") || die "Cannot open $genotypeSkeletonFile";
+
+open(GENO, "$genotypeFile") || die "Cannot open $genotypeFile";
+$headerProcessed = 0;
+
+while (<GENO>)
+{
+    s/\r?\n?$//;
+   
+    if(!$headerProcessed)
+    {		
+        print GENO_SKELETON "$_\n";
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+    	my @fields = split('\t', $_, 2);
+    
+        print GENO_SKELETON "$fields[0]\n";
+	}
+}
+
+close(GENO_SKELETON);
+close(GENO);

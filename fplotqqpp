@@ -1,0 +1,145 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Cwd;
+use Cwd 'abs_path';
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+ fplotqqpp
+
+=head1 SYNOPSIS
+
+ fplotqqpp [options] mk-file
+
+  -o                output file name
+                    Default output file are qq-plot-<file>.pdf and pp-plot-<file>.pdf
+  -t                Title
+  mk-file           marker file
+                    a)snp-id
+                    b)p-value
+
+ example: fplotqqpp -t "QQ Plot of ARIC" pscalare.mk
+
+ Makes a qq and PP plot of genome wide association statistics assumed to be Chi-Square with 1 d.f.
+ 
+=head1 DESCRIPTION
+
+=cut
+
+## Global variables
+my $outputFileName;
+my $ppFileName;
+my $qqFileName;
+my $mkFile;
+my $inputDir;
+my %label2Column;
+my $title = "Study";
+
+## Option variables
+my $help;
+
+## Main Script
+# initialize options
+Getopt::Long::Configure('bundling');
+if(!GetOptions ('h'=>\$help,
+                't=s'=>\$title) 
+    || scalar(@ARGV)!=1)  
+{
+    if ($help)  
+    {
+        pod2usage(-verbose => 2);
+    }
+    else  
+    {
+        pod2usage(1);
+    }
+}
+
+$mkFile = $ARGV[0];
+
+if(!defined($outputFileName))  
+{
+    my($filename, $directories, $suffix) = fileparse($mkFile, '\..*');
+    $ppFileName = "pp-plot-$filename.pdf";
+    $qqFileName = "qq-plot-$filename.pdf";
+    $inputDir = abs_path($directories);
+}
+
+$ppFileName .= '.pdf' unless($ppFileName =~ /\.pdf$/i);
+$qqFileName .= '.pdf' unless($ppFileName =~ /\.pdf$/i);
+
+
+# check file correctness
+open(MK, "< $mkFile") or die "Can't open mk file - $mkFile :: $! \n";
+my $header = <MK>;
+chomp($header);
+my @fields = split('\t', $header);
+SEARCH_LABEL: for my $label ('snp-id', 'p-value')
+{
+    for my $col (0 .. $#fields)
+    {
+        if ($fields[$col] eq $label)
+        {           
+            $label2Column{$label}=$col;
+            next SEARCH_LABEL;
+        }
+    }
+
+        die "Cannot find '$label' in $mkFile";
+}
+close MK;
+
+# Load marker file into R to generate plot
+my $currDir = cwd();
+open(oFILE, "> $currDir/R.input") or die "Can't create temp R input file :: $! \n";
+
+print oFILE <<RSCRIPT;
+genome.data = read.table("$mkFile", header=T, na.strings = "NA")
+
+p.value = genome.data\$p.value[!is.na(genome.data\$p.value)]
+n = length(p.value)
+sortedObservedPValue = sort(p.value)
+expectedPValues = seq(1:n)/(n+1)
+
+pdf("$currDir/$qqFileName");
+plot(qchisq(expectedPValues, 1, lower.tail=T), qchisq(sortedObservedPValue, 1, lower.tail=T), 
+      ylab="Observed Chi-square statistics with 1 df", xlab="Expected Chi-square statistics with 1 df",
+      main="QQ Plot of $title")
+abline(0,1,col="red")
+dev.off();
+
+pdf("$currDir/$ppFileName");
+plot(-log(expectedPValues), -log(sortedObservedPValue), 
+      ylab="-log(Observed p-values)", xlab="-log(Expected p-values)",
+      main="PP Plot of $title")
+abline(0,1,col="red")
+dev.off()
+
+q();
+RSCRIPT
+
+close oFILE;
+
+system("R --vanilla <$currDir/R.input &>$currDir/R.log") == 0 || die "Plotting failed, please check R.input and R.log";
+ 
+if ($? == -1) 
+{
+    warn "failed to execute: $!\n";
+}
+elsif 
+($? & 127) 
+{
+    printf STDERR "child died with signal %d, %s coredump\n", ($? & 127),  ($? & 128) ? 'with' : 'without';
+}
+else 
+{
+    unlink("$currDir/R.input");
+    unlink("$currDir/R.log");
+}
+
+__END__

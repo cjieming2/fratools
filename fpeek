@@ -1,0 +1,86 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+
+#option variables
+my $verbose;
+my $debug;
+
+#variables
+my $genotypeFile;
+my $colNo;
+my $colElement;
+my $rowElement;
+my $selectedRow;
+my $selectedCol;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('v'=>\$verbose, 'd'=>\$debug) || scalar(@ARGV)!=3)
+{
+	print <<HELP;
+usage: fpeek -[vd] <1> <2> <genotype-file>	
+	
+	   v - verbose
+	   d - debug
+	
+	   example: fpeek snpA sampleA pscalare.geno
+	
+	   Gets the value at a row, column entry of a table file.
+	
+HELP
+
+	exit(1);
+}
+
+#look for genotype file
+for my $i (0..$#ARGV)
+{
+	if (-e $ARGV[$i])
+	{
+		$genotypeFile = $ARGV[$i];
+		#isGeno($genotypeFile) || die "$genotypeFile not a genotype file";	
+		splice(@ARGV, $i, 1);
+	}
+}
+
+$rowElement = $ARGV[0];
+$colElement = $ARGV[1];
+
+open(GENO, $genotypeFile) || die "Cannot open $genotypeFile";
+
+while(<GENO>)
+{		
+	if ($.==1)
+	{
+		$colNo = s/\t/\t/g + 1;
+
+		my @fields = split('\t', $_, $colNo);
+		
+		for my $col (1..$#fields)
+		{
+			if ($fields[$col] eq $colElement)
+			{
+				$selectedCol = $col;
+			}
+		}
+	}
+	else
+	{
+		my @fields = split('\t', $_, 2);
+		
+		if ($fields[0] eq $rowElement)
+		{
+			my @selectedRowFields = split('\t', $_, $selectedCol+2);
+			print "$selectedRowFields[$selectedCol]\n";
+			close(GENO);
+			exit(0);
+		}
+	}
+}
+
+close(GENO);

@@ -1,0 +1,112 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+fconcatvcf
+
+=head1 SYNOPSIS
+
+ fconcatvcf [options] <vcf_file> 
+
+  -h             help
+  -o             output file (required)
+  genotype-file  gt or tg file
+    
+  example: fconcatvcf -o ra-317459.txt *.txt
+            
+  Concatenates VCF files. Assumes the columns are all ordered.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $verbose;
+my $outFile = "out.vcf.gz";
+
+#variables
+my $check; # function pointer to isGt or isTg
+my $colNo;
+my %ELEMENT;
+my @sortedElements;
+my $headerProcessed;
+my $missingData;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'v'=>\$verbose, 'o=s'=>\$outFile) 
+   || $help || scalar(@ARGV)==0)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my @orderedFiles;
+
+@orderedFiles = sort {$a<=>$b} @ARGV;
+
+#prepare output file
+open(OUT, "|gzip>$outFile") || die "Cannot open $outFile\n";
+
+my $file1Header;
+
+#iterates through each file and concatenates it to OUT
+foreach my $file (@orderedFiles) 
+{   
+	print "processing $file\n";
+	
+	if(`gzip -t $file` eq "")
+	{
+		open(IN, "gunzip -c $file |") || die "can't open pipe to $file";
+	}
+	else
+	{
+		open(IN, $file) || die "can't open $file";
+	}
+    
+    $headerProcessed = 0;
+    
+    while (<IN>)
+    {        
+        if (!$headerProcessed)
+        {
+			if (/^#CHROM/)
+			{
+	            if($file eq $orderedFiles[0])
+	    		{
+	    			$file1Header = $_;
+	    			print OUT $_;
+	    		}
+	    		
+	            if ($file1Header ne $_)
+	            {
+	            	die "Header for $file not the same as the original file";
+	            }
+	            
+	            $headerProcessed = 1;
+        	}
+        }
+        else
+        {           
+            print OUT $_;
+        }
+    }
+    
+    close(IN);
+}
+
+close(OUT);

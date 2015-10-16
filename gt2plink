@@ -1,0 +1,352 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+gt2structure
+
+=head1 SYNOPSIS
+
+ gt2plink [options] gtFile 
+
+  -h     help
+  -s     sa file
+         a)sample-id
+         b)affection (optional)
+         c)sex (optional)
+  -m     mk file
+         a)snp-id
+         b)chromosome (1-22,X,Y,XY,MT)
+         c)position
+         d)alleles
+  gtFile gt file
+ 
+ example: gt2plink -s pscalare.sa -m pscalare.mk pscalare.gt
+         
+ Converts gt-file to plink pedigree and mapping files.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $gtFile;
+my $saFile;
+my $mkFile;
+my $mapFile;
+my $pedFile;
+
+my $colNo;
+my %label2Column;
+
+#data structures
+my %SAMPLE;
+my %SNP;
+my %CHROM;
+my %SELECTED_SNP;
+my %REDUNDANT_LOCATION_SNP;
+my @col2SNP;
+my %SNP2Column;
+my @snpColumnOrder;
+my @snpColumnOrderAlleleA;
+my @snpColumnOrderAlleleB;
+
+my $snpNo;
+my $sampleNo;
+my $popNo;
+
+my $headerProcessed;
+my $noSexAnnotation;
+my $noAffectionAnnotation;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 's=s'=>\$saFile, 'm=s'=>\$mkFile) 
+   ||!defined($saFile) ||!defined($mkFile) || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$gtFile = $ARGV[0];
+
+#checks if input is not a genotype file
+isGt($gtFile) || die "$gtFile not a gt file";
+
+#read sample annotation
+open(SA, $saFile) || die "Cannot open $saFile";
+$headerProcessed = 0;
+while(<SA>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+         
+        SEARCH_LABEL: for my $label ('sample-id', 'sex', 'affection')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            if ($label eq 'sex')
+            {
+            	$noSexAnnotation = 1;
+            }
+            elsif ($label eq 'affection')
+            {
+            	$noAffectionAnnotation = 1;
+            }
+            else
+            {
+            	die "Cannot find '$label' in $saFile";
+        	}
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $sampleID = $fields[$label2Column{'sample-id'}];
+        my $affection;
+        if ($noAffectionAnnotation || $fields[$label2Column{'affection'}] eq 'n/a') 
+        {
+        	$affection = 0;
+       	}
+       	elsif ($fields[$label2Column{'affection'}] eq 'control')
+       	{
+       		$affection = 1;
+       	}
+       	elsif ($fields[$label2Column{'affection'}] eq 'case')
+       	{
+       		$affection = 2;
+       	}
+       	else
+       	{
+       		die "Unrecognised value in affection column: $fields[$label2Column{'affection'}]";
+       	}
+       	
+		my $sex;
+		
+		if ($noSexAnnotation || $fields[$label2Column{'sex'}] eq 'n/a')
+		{
+			$sex = 0
+		}
+		elsif ($fields[$label2Column{'sex'}] eq 'male')
+		{
+			$sex = 1;
+		}
+		elsif ($fields[$label2Column{'sex'}] eq 'female')
+		{
+			$sex = 2;
+		}
+		else
+		{
+			die "Unrecognised value in sex column: $fields[$label2Column{'sex'}]";
+		}
+                        
+        $SAMPLE{$sampleID}{AFFECTION} = $affection;
+        $SAMPLE{$sampleID}{SEX} = $sex;
+    }
+}
+close(SA);
+
+#read sample annotation
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+         
+        SEARCH_LABEL: for my $label ('snp-id', 'chromosome', 'position', 'alleles')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+
+           	die "Cannot find '$label' in $mkFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $snpID = $fields[$label2Column{'snp-id'}];
+        my $chromosome = $fields[$label2Column{'chromosome'}];
+		my $position = $fields[$label2Column{'position'}];
+        my @alleles = split('/', $fields[$label2Column{'alleles'}]);
+                    
+        $SNP{$snpID}{CHROMOSOME} = $chromosome;
+        $SNP{$snpID}{POSITION} = $position;
+    	$SNP{$snpID}{ALLELE_A} = $alleles[0];
+    	$SNP{$snpID}{ALLELE_B} = $alleles[1];
+
+		if ($chromosome ne 'n/a' && $position ne 'n/a')
+    	{
+	    	if(!exists($CHROM{$chromosome}{$position}))
+			{
+				$CHROM{$chromosome}{$position} = $snpID;
+			}
+			else
+			{
+				$REDUNDANT_LOCATION_SNP{$snpID} = 1;
+				warn "Multiple SNPs with the same location: $snpID, $chromosome, $position with $CHROM{$chromosome}{$position} dropped";
+			}
+		}
+		else
+		{
+			warn "SNP without location: $snpID dropped";
+		}
+    }
+}
+close(MK);
+
+#prepare structure data file
+open (GT, $gtFile) || die "Cannot open $gtFile";
+$headerProcessed = 0;
+
+while(<GT>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        if(!defined($mapFile))  
+		{
+		  my($name, $path, $ext) = fileparse($gtFile, '\..*');
+		  $mapFile = "$name.map";
+		}
+		
+		for my $col (1..$#fields)
+        {
+        	my $snpID = $fields[$col];
+        	$col2SNP[$col] = $snpID;
+        	$SNP2Column{$snpID} = $col;
+        	
+        	if (exists($SNP{$snpID}))
+        	{
+        		if (!exists($REDUNDANT_LOCATION_SNP{$snpID}))
+        		{
+        			$SELECTED_SNP{$snpID} = $col;
+           		}
+        	}
+        	else
+        	{
+        		warn "$snpID exists in $gtFile but not in $mkFile";
+        	}
+        }
+        
+        open(MAP, ">$mapFile") || die "Cannot open $mapFile";       
+        for my $chromosome (sort {if ("$a$b"=~/\D/) {$a cmp $b} else {$a <=> $b}} keys(%CHROM))
+		{
+			for my $position (sort {$a <=> $b} keys(%{$CHROM{$chromosome}}))
+			{						
+				my $snpID = $CHROM{$chromosome}{$position};
+				
+				if(exists($SELECTED_SNP{$snpID}))
+				{
+					push(@snpColumnOrder, $SELECTED_SNP{$snpID});
+					push(@snpColumnOrderAlleleA, $SNP{$snpID}{ALLELE_A});
+					push(@snpColumnOrderAlleleB, $SNP{$snpID}{ALLELE_B});
+					print MAP "$SNP{$snpID}{CHROMOSOME}\t$snpID\t0\t$SNP{$snpID}{POSITION}\n";
+				}
+			}
+		}
+        close(MAP);
+        
+        if(!defined($pedFile))  
+		{
+		  my($name, $path, $ext) = fileparse($gtFile, '\..*');
+		  $pedFile = "$name.ped";
+		}
+		
+		open(PED, ">$pedFile") || die "Cannot open $pedFile";
+
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $sampleID = $fields[0];
+		
+		if(exists($SAMPLE{$sampleID}))
+		{
+			print PED "FAM$sampleID\t$sampleID\t0\t0\t$SAMPLE{$sampleID}{SEX}\t$SAMPLE{$sampleID}{AFFECTION}";
+		
+		    my $i = 0;
+		    my $alleleA;
+		    my $alleleB;
+			for my $col (@snpColumnOrder)
+			{	
+				$alleleA =$snpColumnOrderAlleleA[$i];
+				$alleleB =$snpColumnOrderAlleleB[$i];
+				
+				if($fields[$col]==-1)  
+				{
+					print PED "\t0\t0";
+				}
+				elsif($fields[$col]==0)
+				{
+					print PED "\t$alleleA\t$alleleA";
+				}
+				elsif($fields[$col]==1)
+				{
+					print PED "\t$alleleA\t$alleleB";
+				}
+				else
+				{
+					print PED "\t$alleleB\t$alleleB";
+				}
+				
+				++$i;
+			}
+
+			print PED "\n";
+	    }
+	    else
+	    {
+	    	warn "$sampleID exists in $gtFile but not in $saFile";
+	    }
+    }
+}
+close(GT);
+close(PED);

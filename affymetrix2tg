@@ -1,0 +1,109 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+affymetrix2tg
+
+=head1 SYNOPSIS
+
+ affymetrix2tg [options] <affymetrix-call-file>	
+
+  -h                     help
+  -o                     output file name (optional)
+                         default: replaces extension of 
+                         <affymetrix-call-file>	with tg
+  affymetrix-call-file   Affymetrix calls file
+       
+ example: affymetrix2tg -o pscalare.tg brlmm.calls.txt
+       
+ Converts the affymetrix calls output file to a tg-file.
+       
+=head1 DESCRIPTION
+
+=cut
+
+my $help;
+my $affymetrixFile;
+my $tgFile;
+my $headerProcessed = 0;
+my $colNo;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'o=s'=>\$tgFile) || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$affymetrixFile = $ARGV[0];
+
+if (!defined($tgFile))
+{
+    my ($name, $path, $ext) = fileparse($affymetrixFile, '\..*');
+	$tgFile = "$name.tg";
+}
+
+open(IN, $affymetrixFile) || die "Cannot open $affymetrixFile\n";
+open(OUT, ">$tgFile") || die "Cannot open $tgFile\n";
+
+while (<IN>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed) 
+	{
+		if(/^probeset_id/)  
+		{
+			$colNo = s/\t/\t/g + 1;
+			my @fields = split('\t',$_,$colNo);
+
+			print OUT "snp-id";
+
+			#reads in sample ids
+			for my $col (1 .. $#fields)  
+			{			
+				print OUT "\t$fields[$col]";			
+			}
+			print OUT "\n";
+			$headerProcessed = 1;
+		}
+	}
+	else
+	{
+		my @fields = split(/\t/);
+							
+		print OUT "$fields[0]";
+			
+		for my $col (1 .. $#fields)  
+		{
+			if($fields[$col]=~/^(0|1|2|-1)$/)
+			{
+				print OUT "\t$fields[$col]";
+			}
+			else
+			{
+				die "Unrecognized encoding in $affymetrixFile: $fields[$col]";
+			}
+		}
+			
+		print OUT "\n";
+	}
+}
+
+close(OUT);
+close(IN);

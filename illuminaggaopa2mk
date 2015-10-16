@@ -1,0 +1,187 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+illuminaggaopa2mk
+
+=head1 SYNOPSIS
+
+ illuminaggaopa2mk [options] <illumina-opa-file>
+ 
+  -h                   detailed help message.
+  illumina-opa-file    illumina goldengate assay annotation file.
+
+ example: illuminaggaopa2mk pscalare.txt
+
+ Converts Illumina Goldengate Assay annotation (tab delimited) to mk format.
+ Output file is named <illumina-opa-file>.mk
+
+ The extracted fields followed by its new name are:
+ 1)SNP_Name           snp-id
+ 2)dbSNP RS ID        rs-id
+ 3)Chr                chromosome
+ 4)Coordinate         position
+ 6)dbSNP_Version      dbsnp
+ 7)Sequence           flanks
+
+ Two additional fields are added
+ 
+ alleles              alleles (in TOP orientation)
+ alleles-strand       describes the allele orientation with reference to the flanks is added.
+        
+=head1 DESCRIPTION
+
+ Illumina Goldengate OPA Annotation file should contain the following fields
+
+ SNP_Name
+ Sequence
+ Genome_Build_Version
+ Chr
+ Coordinate
+ Source
+ dbSNP_Version
+ Ploidy
+ Species
+ Customer_Strand
+ SNPDome_Must_Keep
+ Customer_Annotation
+ SNP_Score
+ Designability_Rank
+ Failure_Codes
+ Validation_Class
+ Validation_Bin
+ MAF_Default_SNPDome
+ MAF_Caucasian
+ ChrCount_Caucasian
+ Study_Caucasian
+ MAF_African
+ ChrCount_African
+ Study_African
+ MAF_African_American
+ ChrCount_African_American
+ Study_AfricanAmerican
+ MAF_Japanese
+ ChrCount_Japanese
+ Study_Japanese
+ MAF_Chinese
+ ChrCount_Chinese
+ Study_Chinese
+ MAF_Other
+ ChrCount_Other
+ Study_Other
+ App_Version
+ 
+=cut
+
+my $goldengateOPAFile;
+my $mkFile;
+my $help;
+my $headerProcessed;
+my $colNo;
+my %anno2col;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help) || $help || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$goldengateOPAFile = $ARGV[0];
+
+#reads in the GISSNP illumina annotation
+open(GGA_OPA_ANNOTATION, $goldengateOPAFile) || die "Cannot open $goldengateOPAFile\n";
+
+if(!defined($mkFile))
+{
+	my ($name, $dir, $ext) = fileparse($goldengateOPAFile, '\..*');
+	$mkFile = "$name.mk";
+}
+
+$headerProcessed = 0;
+open(MK, ">$mkFile") || die "Cannot open $mkFile\n";
+
+while (<GGA_OPA_ANNOTATION>)
+{
+    s/\r?\n?$//;
+
+    if(!$headerProcessed)
+    {
+    	print MK "snp-id\trs-id\tchromosome\tposition\tdbsnp\talleles\talleles-strand\tflanks\n";
+
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+ 
+        SEARCH_LABEL: for my $label ('SNP_Name', 'Chr', 'Coordinate' , 'dbSNP_Version', 'Sequence') 
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $anno2col{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $mkFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {   
+        my @fields = split('\t', $_, -1);
+                
+        my $snpId = trim($fields[$anno2col{'SNP_Name'}]);
+        my $rsId = $snpId;
+        $rsId =~ s/_.*$//;
+        my $chromosome = trim($fields[$anno2col{'Chr'}]);
+        my $position = trim($fields[$anno2col{'Coordinate'}]);
+        my $dbsnp = trim($fields[$anno2col{'dbSNP_Version'}]);
+		my $alleles;
+		my $allelesStrand;
+        my $flanks = uc(trim($fields[$anno2col{'Sequence'}]));
+		
+		my $referenceStrandOrientation = getTopBotStrandFromFlanks($flanks);
+		if (!defined($referenceStrandOrientation))
+		{
+			die "$flanks is not topbotifiable";
+		}
+
+		if($flanks=~/\[([ACGT])\/([ACGT])\]/)
+		{
+			if($referenceStrandOrientation eq 'top')
+			{
+				$allelesStrand = 'ref';
+				$alleles = join('/', sort ($1, $2));
+			}
+			elsif ($referenceStrandOrientation eq 'bot')
+			{
+				$allelesStrand = 'opp';
+				$alleles = join('/', sort (complement($1), complement($2)));
+				warn "$snpId has flanks that are not top oriented: $flanks";
+			}
+		}
+                    
+        printf MK "$snpId\t$rsId\t$chromosome\t$position\t$dbsnp\t$alleles\t$allelesStrand\t$flanks\n";
+    }
+}
+
+close(GGA_OPA_ANNOTATION);
+close(MK);

@@ -1,0 +1,157 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Cwd;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+frank
+
+=head1 SYNOPSIS
+
+ frank [options] <table-file>
+  
+  -h          help
+  table-file  data file with headers
+  
+  example: frank pscalare.pval
+ 
+  Adds columns that show the rank of existing columns, assumes that all columns are numerical.
+ 
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $tableFile;
+my $sqlFile;
+my $dataFile;
+my $colNo;
+my $headerProcessed;
+my @labels;
+my @maxFieldLength;
+my $addRankFieldName;
+my @fieldHashes;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'r:s'=>\$addRankFieldName)
+   || scalar(@ARGV) != 1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$tableFile = $ARGV[0];
+
+my ($name, $path, $ext) = fileparse($tableFile, '\..*');
+$dataFile = "ranked-$name.txt";
+open(DATA, ">$dataFile") || die "Cannot open $dataFile";
+
+open(TABLE, $tableFile) || die "Cannot open $tableFile";
+$headerProcessed = 0;
+while(<TABLE>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+	
+		for my $col (1 .. $#fields)
+		{
+			$fieldHashes[$col] = ();
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+        
+        for my $col (1 .. $#fields)
+		{
+			if ($fields[$col] eq 'n/a')
+			{
+				$fieldHashes[$col]{10}++;
+			}
+			else
+			{
+		    	$fieldHashes[$col]{$fields[$col]}++;
+			}
+		}
+	}
+}
+
+for my $col (1 .. $#fieldHashes)
+{
+	my $rank = 0;
+	for my $value (sort {$a <=> $b} keys(%{$fieldHashes[$col]}))
+	{
+		$fieldHashes[$col]{$value} = ++$rank;
+	}
+}
+
+seek(TABLE, 0, 0);
+$headerProcessed = 0;
+
+while(<TABLE>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+	
+		print DATA $fields[0];
+	
+		for my $col (1 .. $#fields)
+		{
+			print DATA "\t$fields[$col]-rank\t$fields[$col]"
+		}
+		
+		print DATA "\n";
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+        
+        print DATA $fields[0];
+        
+        for my $col (1 .. $#fields)
+		{
+			if ($fields[$col] eq 'n/a')
+			{
+			    print DATA "\t$fieldHashes[$col]{10}\t$fields[$col]";
+			}
+			else
+			{
+				print DATA "\t$fieldHashes[$col]{$fields[$col]}\t$fields[$col]";
+			}
+
+		}
+	
+		print DATA "\n";
+	}
+}
+close(TABLE);
+close(DATA);

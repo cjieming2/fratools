@@ -1,0 +1,418 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+fsynchalleles
+
+=head1 SYNOPSIS
+
+ fsynchalleles [options] mk-file
+    
+  -strand  (top|bot|affyref|forward|forward-topbot)
+            a)top/bot - as defined by Illumina
+            b)affyref - as defined by Affymetrix 
+              Exception class SNPs are handled, please use 
+              probe set id for identification.
+            c)forward - alleles from forward (+) strand defined 
+              by NCBI Genome Assembly, alleles lexically ordered.
+            d)forward-topbot - alleles from forward (+) strand defined 
+              by NCBI Genome Assembly, alleles ordered according to top bot
+              classification of forward strand.
+  mk-file   marker file 
+            a)snp-id
+            b)alleles
+            c)flanks
+            d)strand
+  
+ example: fsynchalleles pscalare.mk --strand top
+    
+ Converts alleles into top or bot order within a marker file.
+ This is used for porting purposes as we previously did not 
+ take note of top/bot conventions. Output is synched-<mk-file>.
+ 
+ This is a useful method for checking if the flanks in a SNP 
+ annotation file are all TOP or Affy reference strand.
+       
+=head1 DESCRIPTION
+ 
+=cut
+
+
+#option variables
+my $help;
+my $desiredStrand;
+my $mkFile;
+my $synchedMkFile;
+my @col2snp;
+my %SNP;
+my $colNo;
+my %label2Column;
+my $headerProcessed;
+my $allelesFieldNo = -1;
+my $allelesStrandFieldNo = -1;
+my $flanksFieldNo = -1;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions('h'=>\$help, 'strand=s'=>\$desiredStrand)
+   || !(defined($desiredStrand) && $desiredStrand=~/^(top|bot|affyref|forward|forward-topbot)$/)
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$mkFile = $ARGV[0];
+    
+open(MK, $mkFile) || die "Cannot open $mkFile, $!";
+
+if(!defined($synchedMkFile))  
+{
+  my($name, $path, $ext) = fileparse($mkFile, '\..*');
+  $synchedMkFile = "synched-$name$ext";
+}
+
+open(SYNCHED_MK, ">$synchedMkFile") || die "Cannot open $synchedMkFile";
+$headerProcessed = 0;
+
+LINES: while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('snp-id', 'flanks', 'strand')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+
+            if ($desiredStrand eq 'forward')
+            {
+                die "Cannot find '$label' in $mkFile";
+            }
+            else
+            {
+                if ($label ne 'strand')
+                {
+                    die "Cannot find '$label' in $mkFile";
+                }
+            } 
+        }
+		
+        #print contents of old mk file		
+		for my $col (0 .. $#fields)
+		{
+			my $label = $fields[$col];
+			
+			if ($label eq 'alleles')
+			{			
+			    $allelesFieldNo = $col;
+			    #don't print
+			}
+			elsif ($label eq 'alleles-strand')
+			{
+			    $allelesStrandFieldNo = $col;
+				#don't print
+			}
+			elsif ($label eq 'flanks')
+			{
+			    $flanksFieldNo = $col;
+				#don't print
+			}
+			else
+			{
+				print SYNCHED_MK "$label\t";
+			}
+		}
+        
+		print SYNCHED_MK "alleles\talleles-strand\tflanks\n";
+		
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $snpId = $fields[$label2Column{'snp-id'}];
+        my $flanks = $fields[$label2Column{'flanks'}];
+        my @alleles;
+        my $strand;
+		              
+        my $complement;
+        my $order;
+
+        my $allelesStrand;
+        my @recodedAlleles;
+                
+        my $referenceStrandOrientation;
+                
+        #SNP recoding
+        #figure out recoding steps: ordering and complementing
+        if($desiredStrand=~/^(top|bot)$/)
+        {
+            $referenceStrandOrientation = getTopBotStrandFromFlanks($flanks);
+            
+            if(defined($referenceStrandOrientation))
+            {
+                if ($flanks=~/\[([ACGT]\/[ACGT])\]/)
+                {
+                    @alleles = sort(split('/',$1))
+                }
+                
+                if ($desiredStrand eq $referenceStrandOrientation)
+                {
+                    $complement = 0;
+                    $allelesStrand = 'ref';
+                }
+                else
+                {
+                    $complement = 1;
+                    $allelesStrand = 'opp';
+                }
+                
+                if ($desiredStrand eq 'top')
+                {
+                    $order = 1;
+                }
+                else
+                {
+                    $order = 0;
+                }
+            }
+        }
+        elsif ($desiredStrand=~/^affyref$/)
+        {
+            $referenceStrandOrientation = getAffyRefOppStrandFromFlanks($flanks);
+            
+            if(defined($referenceStrandOrientation))
+            {
+                if(isInAffymetrixExceptionClass($snpId))
+                {
+                    if ($referenceStrandOrientation eq 'affyref')
+                    {
+                        $referenceStrandOrientation = 'affyopp';
+                    }
+                    else
+                    {
+                        $referenceStrandOrientation = 'affyref';
+                    }
+                }
+                
+                if ($flanks=~/\[([ACGT]\/[ACGT])\]/)
+                {
+                    @alleles = sort(split('/',$1))
+                }
+                
+                if ($desiredStrand eq $referenceStrandOrientation)
+                {
+                    $complement = 0;
+                    $allelesStrand = 'ref';
+                }
+                else
+                {
+                    $complement = 1;
+                    $allelesStrand = 'opp';
+                }
+                
+                #for affyref and affyopp, the alleles are always ordered
+                $order = 1;
+            }
+        }
+        elsif ($desiredStrand eq 'forward')
+        {
+            $strand = $fields[$label2Column{'strand'}];
+
+            if ($strand eq '+')
+            {
+                $referenceStrandOrientation = 'forward';
+            }
+            elsif ($strand eq '-')
+            {
+                $referenceStrandOrientation = 'reverse';
+            }
+            elsif ($strand eq 'n/a')
+            {
+                $referenceStrandOrientation = undef;
+            }
+            else
+            {
+                die "$snpId: $strand not valid";
+            }
+
+            if ($flanks=~/\[([ACGT-]+)\/([ACGT-]+)\]/ 
+                && !($1 eq '-' && $2 eq '-'))
+            {
+                @alleles = ($1, $2);
+            }
+            else
+            {
+                $referenceStrandOrientation = undef;
+            }
+                                                        
+            if(defined($referenceStrandOrientation))
+            {
+                if ($desiredStrand eq $referenceStrandOrientation)
+                {
+                    $complement = 0;
+                    $allelesStrand = 'ref';
+                }
+                else
+                {
+                    $complement = 1;
+                    $allelesStrand = 'opp';
+                }
+                
+                $order = 1;
+            }
+        }
+        elsif ($desiredStrand eq 'forward-topbot')
+        {
+            $strand = $fields[$label2Column{'strand'}];
+
+            #get orientation of flanks
+			my $topbotStrandOrientation = getTopBotStrandFromFlanks($flanks);
+			
+			if ($strand eq 'n/a' || !defined($topbotStrandOrientation))
+			{
+			   $referenceStrandOrientation = undef; 
+			}
+			elsif ($strand eq '+' && $topbotStrandOrientation eq 'top')
+			{
+			   $referenceStrandOrientation = 'forward-top'; 
+			}
+			elsif ($strand eq '+' && $topbotStrandOrientation eq 'bot')
+			{
+			   $referenceStrandOrientation = 'forward-bot'; 
+			}
+			elsif ($strand eq '-' && $topbotStrandOrientation eq 'top')
+			{
+			   $referenceStrandOrientation = 'reverse-top'; 
+			}
+			elsif ($strand eq '-' && $topbotStrandOrientation eq 'bot')
+			{
+			   $referenceStrandOrientation = 'reverse-bot'; 
+			}			
+			else
+			{
+			   die "invalid strand: $strand or flanks not topbotifiable: " . (!defined($topbotStrandOrientation)?'n/a':$topbotStrandOrientation);
+			}
+                                                       
+            if(defined($referenceStrandOrientation))
+            {
+                if ($flanks=~/\[([ACGT])\/([ACGT])\]/)
+                {
+                    @alleles = ($1, $2);
+                }
+            
+                if ($referenceStrandOrientation eq 'forward-top')
+                {
+                    $complement = 0;
+                    $allelesStrand = 'ref';
+                    $order = 1;
+                }
+                elsif ($referenceStrandOrientation eq 'forward-bot')
+                {
+                    $complement = 0;
+                    $allelesStrand = 'ref';
+                    $order = 0;
+                }
+                elsif ($referenceStrandOrientation eq 'reverse-top')
+                {
+                    $complement = 1;
+                    $allelesStrand = 'opp';
+                    $order = 0;
+                }
+                elsif ($referenceStrandOrientation eq 'reverse-bot')
+                {
+                    $complement = 1;
+                    $allelesStrand = 'opp';
+                    $order = 1;
+                }                
+            }
+        }
+        
+        if(defined($referenceStrandOrientation))
+        {
+            if ($complement)
+            {
+                $recodedAlleles[0] = reverseComplement($alleles[0]);
+                $recodedAlleles[1] = reverseComplement($alleles[1]);
+            }
+            else
+            {
+                @recodedAlleles = @alleles;
+            }
+            
+            if ($order)
+            {
+                @recodedAlleles = sort {uc($a) cmp uc($b)} @recodedAlleles;
+            }
+            else
+            {
+                @recodedAlleles = sort {uc($b) cmp uc($a)} @recodedAlleles;
+            }
+        }
+        else
+        {
+            $recodedAlleles[0] = 'n';
+            $recodedAlleles[1] = 'a';
+            $allelesStrand = 'n/a';
+            
+            if ($desiredStrand eq 'forward')
+            {
+                warn "$snpId : strand and flanks - ($strand, $flanks) cannot be synchronized to forward orientation";
+            }
+            else
+            {
+                warn "$snpId : flanks - $flanks cannot be synchronized to $desiredStrand orientation";                
+            }
+        }
+				
+		PRINT_RECODED_ALLELES_LABEL:
+		
+		for my $col (0 .. $#fields)
+		{				    
+			if ($col==$allelesFieldNo || $col==$allelesStrandFieldNo || $col==$flanksFieldNo)
+			{
+				#don't print
+			}	
+			else
+			{
+			    if (!defined($fields[$col]))
+			    {
+			        $fields[$col] = 'n/a';
+			    }
+			    
+				print SYNCHED_MK "$fields[$col]\t";
+			}
+		}
+		
+		print SYNCHED_MK "$recodedAlleles[0]/$recodedAlleles[1]\t$allelesStrand\t$flanks\n";
+    }
+}
+
+close(MK);
+close(SYNCHED_MK);

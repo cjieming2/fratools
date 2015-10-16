@@ -1,0 +1,393 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+gt2relpair
+
+=head1 SYNOPSIS
+
+ gt2relpair [options] <gt-file>
+
+  -v      verbose
+  -d      debug
+  -m      SNP annotation file (required)
+          1)snp-id
+          2)chromosome
+          3)chromosome-type
+          4)position
+  -u      treat markers as unlinked markers
+  -e      error rate (default 0.01)
+  -c      critical value (default 1000)
+  -a      autosomal SNPs only
+  -o      output file without extension
+  gt-file gt file
+  
+  example: gt2relpair -m pscalare.mk -o pscalare pscalare.gt
+       
+=head1 DESCRIPTION
+
+=cut
+
+my $verbose;
+my $debug;
+my $genotypeFile;
+my $snpAnnotationFile;
+my $unlinked;
+my $autosomalSNPsOnly;
+my $errorRate = 0.01;
+my $criticalVal = 1000;
+my $outFile;
+my $sampleNo;
+my $snpNo;
+my $colNo;
+my %SNP;
+my %X_SNP;
+my %anno2col;
+my $maxPosition = 0;
+my @orderedSNPs;
+my $maxSampleNameLength = 0;
+my $help;
+my $headerProcessed;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('v'=>\$verbose,'d'=>\$debug,'m=s'=>\$snpAnnotationFile, 
+			    'o=s'=>\$outFile, 'u'=>\$unlinked,'c=i'=>\$criticalVal, 
+			    'a'=>\$autosomalSNPsOnly, 'e=f'=>\$errorRate) 
+   || !defined($snpAnnotationFile) || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$genotypeFile = $ARGV[0];
+
+#input formats
+isGt($genotypeFile) || die "$genotypeFile not genotype file";
+
+if(!defined($outFile))
+{
+    my ($name, $path, $ext) = fileparse($genotypeFile, '\..*');
+	$outFile = $name;
+}
+
+#transfer annotation file to memory
+open(SNP_ANNOTATION, $snpAnnotationFile) || die "Cannot open $snpAnnotationFile";
+$maxPosition = 0;
+
+while(<SNP_ANNOTATION>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		SEARCH_LABEL: for my $data ('snp-id', 'chromosome', 'chromosome-type', 'position')
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $data)
+				{			
+					$anno2col{$data}=$col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			unless ($autosomalSNPsOnly && $data eq 'chromosome-type')
+			{
+				die "Cannot find '$data' in $snpAnnotationFile";
+			}
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		my $snp = $fields[$anno2col{'snp-id'}];
+		my $chromosome = $fields[$anno2col{'chromosome'}];
+		my $chromosomeType = $autosomalSNPsOnly ? 'autosome' : $fields[$anno2col{'chromosome-type'}];
+		my $position = $fields[$anno2col{'position'}];
+		
+		if ($autosomalSNPsOnly || $chromosomeType eq 'autosome')
+		{
+			if ($chromosome eq 'n/a')
+			{
+				warn "$snp has no mapping position";
+			}
+			else
+			{
+				$maxPosition = $position if ($position>$maxPosition);	
+				$SNP{$snp}{'chromosome'} = $chromosome;
+				$SNP{$snp}{'chromosome-type'} = $chromosomeType eq 'autosome'? 'AUTOSOME' : 'X-LINKED';
+				$SNP{$snp}{'position'} = $position;
+			}
+		}
+		else
+		{
+			$X_SNP{$snp} = 1;
+		}
+	}
+}
+
+#this is somewhat dangerous
+my $factor = $maxPosition / 1;
+
+if ($debug)
+{
+	foreach my $snp (keys(%SNP))
+	{
+		print "$snp\t$SNP{$snp}{'chromosome'}\t$SNP{$snp}{'chromosome-type'}\t$SNP{$snp}{'position'}\n";
+		print "$snp\t". exists($SNP{$snp})."\n";
+	}
+	
+	print "$maxPosition\n";
+}
+
+close(SNP_ANNOTATION);
+
+#counts number of SNPs
+
+open(GENO, $genotypeFile) || die "Cannot open $genotypeFile";
+$headerProcessed = 0;
+
+while (<GENO>)
+{
+	s/\r?\n?$//;
+
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		my @fields = split('\t', $_, $colNo);
+		for my $col (1..$#fields)
+		{
+			my $snp = $fields[$col];
+			
+			if(exists($SNP{$snp}))
+			{
+				push(@orderedSNPs, $snp);
+				$SNP{$snp}{'index'} = $col;
+			}
+			else
+			{
+				if (exists($X_SNP{$snp}))
+				{
+					warn "$snp is x-linked and is ignored" if ($verbose);
+				}
+				else
+				{
+					warn "$snp does not exist in annotation file" if ($verbose);
+				}
+			}
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, 2);
+		$sampleNo++;
+		$maxSampleNameLength = max(length($fields[0]),$maxSampleNameLength);
+	}
+}
+$snpNo = scalar(@orderedSNPs);
+
+close(GENO);
+
+#create locus file and pedigree file
+open(GENO, $genotypeFile) || die "Cannot open $genotypeFile";
+$headerProcessed = 0;
+open(PEDIGREE, ">$outFile.ped") || die "Cannot open $outFile.ped";
+
+print PEDIGREE "(I1,1x,A8)\n";
+printf PEDIGREE "(3A%d,2A1,A3,%d(1X,A3))\n", $maxSampleNameLength, ($snpNo-1);
+
+while (<GENO>)
+{
+	s/\r?\n?$//;
+	
+	if (!$headerProcessed)
+	{
+		#initialize
+		for my $i (0 .. $#orderedSNPs)
+		{
+			my $snp = $orderedSNPs[$i];
+			$SNP{$snp}{A} = 0;
+			$SNP{$snp}{'total'} = 0;
+		}
+	
+		$headerProcessed = 1;	
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		
+		my $sample = $fields[0];
+
+		printf PEDIGREE "1 %s\n", padFam(($.-1));
+		printf PEDIGREE "%s%s%sF ", pad($sample, $maxSampleNameLength), pad("", $maxSampleNameLength), pad("", $maxSampleNameLength);
+
+		for my $i (0 .. $#orderedSNPs)
+		{
+			my $snp = $orderedSNPs[$i];
+			my $col = $SNP{$snp}{'index'};
+			
+			if ($fields[$col]==0)
+			{
+				$SNP{$snp}{A} += 2;
+				$SNP{$snp}{'total'} += 2;
+				print PEDIGREE "A/A";
+			}
+			elsif ($fields[$col]==1)
+			{
+				$SNP{$snp}{A} += 1;
+				$SNP{$snp}{'total'} += 2;
+				print PEDIGREE "A/B";
+			}
+			elsif ($fields[$col]==2)
+			{
+				$SNP{$snp}{'total'} += 2;
+				print PEDIGREE "B/B";
+			}
+			elsif ($fields[$col]==-1)
+			{
+				print PEDIGREE "   ";
+			}
+			else
+			{
+				die "Genotype format at column $col is not numeric";
+			}
+			
+			if ($i==$#orderedSNPs)
+			{
+				print PEDIGREE "\n";
+			}
+			else
+			{
+				print PEDIGREE " ";
+			}
+		}
+	}
+}
+close(GENO);
+close(PEDIGREE);
+
+open(LOCUS, ">$outFile.loc") || die "Cannot open $outFile.loc";
+for my $snp (@orderedSNPs)
+{
+	my $aFreq;
+	if ($SNP{$snp}{total}==0) 
+	{
+		warn "$snp has no known genotype for any of the samples, frequency set to 0.5";
+		$aFreq = 0.5;
+	}
+	else
+	{
+		$aFreq = $SNP{$snp}{A}/$SNP{$snp}{total};
+	}
+	
+	if($unlinked)
+	{
+		printf LOCUS "$snp $SNP{$snp}{'chromosome-type'} 2 0 0.0\n";
+	}
+	else
+	{	
+		printf LOCUS "$snp $SNP{$snp}{'chromosome-type'} 2 $SNP{$snp}{'chromosome'} %0.4f\n", $SNP{$snp}{position}/$factor;	 
+	}
+	$aFreq = 0.9999 if ($aFreq==1);
+	$aFreq = 0.0001 if ($aFreq==0);
+	printf LOCUS "A %0.4f\n", $aFreq;
+	printf LOCUS "B %0.4f\n", (1-$aFreq);
+
+	delete($SNP{$snp});
+}
+close(LOCUS);
+
+open(CONTROL, ">$outFile.ctl") || die "Cannot open $outFile.ctl";
+
+print CONTROL <<CONTROL_PARAM;
+$outFile.loc
+$outFile.ped
+$outFile.out
+all
+n
+n
+F
+M
+1800
+$errorRate
+1
+$criticalVal.0
+CONTROL_PARAM
+
+close(CONTROL);
+
+print <<REPORT;
+No. of Samples : $sampleNo
+No. of SNPs : $snpNo
+Factor : $factor
+Critical Value : $criticalVal
+Error Rate : $errorRate
+REPORT
+
+for my $snp (keys(%SNP))
+{
+	warn "$snp does not exist in genotype file\n" if ($verbose);
+}
+
+sub pad
+{
+	my ($name, $width) = @_;
+	
+	if (length($name)<=$width)
+	{
+		my $padding = $width - length($name);
+		for (1..$padding)
+		{
+			$name = " $name";
+		}
+		
+		return $name;
+	}
+	else
+	{
+		die "$name exceeds length";
+	}
+}
+
+sub padFam
+{
+	my $name = shift;
+	
+	if (length($name)<=5)
+	{
+		my $padding = 5 - length($name);
+		for (1..$padding)
+		{
+			$name = "0$name";
+		}
+		
+		return "FAM$name";
+	}
+	else
+	{
+		die "$name exceeds length";
+	}
+}

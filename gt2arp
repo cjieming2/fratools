@@ -1,0 +1,279 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Fcntl;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+fannotatestrands
+
+=head1 SYNOPSIS
+
+ gt2arp [options] <gt-file>	
+	
+  -h  help
+  -s  sa file (required)	
+      a)sample-id
+      b}population-id
+      c)gender (if haploid format is required)	
+  -h  haploid format (breaks females into 2 haploids)
+  -o  output file (default output file is <genotype-base-file-name>.arp)
+	
+  example: gt2arp -s pscalare.sa pscalare.gt
+    
+  Converts a gtfile to an Arlequin genotype file.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $arpFile;
+my $haploid;
+my $saFile;
+my $colNo;
+my $filePosition;
+my %label2col;
+my $headerProcessed;
+my %POP;
+my %SAMPLE;
+my $count;
+my $gtFile;
+my $popNo;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'o=s'=>\$arpFile,'haploid'=>\$haploid, 's=s'=>\$saFile) 
+   || !defined($saFile) 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$gtFile = $ARGV[0];
+
+#checks if input is genotype file
+isGt($gtFile) || die "Input files should be genotype files";
+
+if(!defined($arpFile))
+{
+    my ($name, $path, $ext) = fileparse($gtFile, '\..*');
+    $arpFile = "$name.arp";
+}
+
+#reads in population list file
+open(SA, $saFile) || die "Cannot open $saFile\n";
+$headerProcessed = 0;
+
+while (<SA>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        my @labels = ('sample-id', 'population-id');
+        if ($haploid)
+        {
+            push (@labels, 'gender');
+        }
+        
+        SEARCH_LABEL: for my $label (@labels)
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2col{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $saFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        
+        my $sample = $fields[$label2col{'sample-id'}];
+        my $population = $fields[$label2col{'population-id'}];
+
+        $SAMPLE{$sample}{POPULATION} = $population;
+        $SAMPLE{$sample}{FPOS} = -1;
+        
+        if ($haploid)
+        {
+            my $gender = $fields[$label2col{'gender'}];
+            $SAMPLE{$sample}{GENDER} = $gender;
+        }
+    }
+}
+
+close(SA);
+
+#scan through document to take note of sample locations
+open(GT, $gtFile) || die "Cannot open $gtFile\n";
+$headerProcessed = 0;
+$filePosition = 0;
+while (<GT>)
+{
+    s/\r?\n?$//;
+
+    if(!$headerProcessed)
+    {
+        #ignore header;
+        $colNo = s/\t/\t/g + 1;
+    
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $sample = $fields[0];
+        
+        if(exists($SAMPLE{$sample}))
+        {
+            my $population = $SAMPLE{$sample}{POPULATION};
+            
+            $SAMPLE{$sample}{FPOS} = $filePosition;
+            push (@{$POP{$population}{SAMPLES}}, $sample);
+            $POP{$population}{SIZE}++;
+            if ($haploid && $SAMPLE{$sample}{GENDER} eq 'female')
+            {
+                $POP{$population}{SIZE}++;
+            }
+        }
+    }
+    
+    $filePosition += length($_) + 1;
+}
+
+$popNo = scalar(keys(%POP));
+
+open(OUT, ">$arpFile") || die "Cannot open $arpFile";
+
+print OUT <<HEADER;
+[Profile]
+    Title="$gtFile"
+    NbSamples=$popNo
+    GenotypicData=1
+    GameticPhase=0
+    DataType=STANDARD
+    LocusSeparator=NONE
+
+[Data]
+    [[Samples]]
+HEADER
+
+#print groups and genotypes
+for my $population (sort(keys(%POP)))
+{
+    print OUT "\t\tSampleName=\"$population\"\n";
+    print OUT "\t\tSampleSize=" . $POP{$population}{SIZE} . "\n";
+    print OUT "\t\tSampleData={\n";
+    
+    for my $sample (sort(@{$POP{$population}{SAMPLES}}))
+    {
+        seek(GT, $SAMPLE{$sample}{FPOS}, 0) || die "Seeking: $!\n";
+        $_ = <GT>;
+        
+        my @fields = split("\t", $_, $colNo);
+        
+        print OUT "\t\t\t\"$fields[0]\"\t1\t";
+        
+        my $allele;
+        
+        for my $col (1..$#fields)
+        {
+            $allele = $fields[$col];
+            if ($allele==0)
+            {
+                print OUT "A";
+            }
+            elsif ($allele==1)
+            {
+                print OUT "A";
+            }
+            elsif ($allele==2)
+            {
+                print OUT "B";
+            }
+            elsif ($allele==-1)
+            {
+                print OUT "?";
+            }
+            else
+            {
+                die "Unrecognised genotype: $allele";
+            }
+        }
+        
+        print OUT "\n";
+        
+        if ($haploid)
+        {
+            if ($SAMPLE{$sample}{GENDER} eq 'female')
+            {
+                print OUT "\t\t\t\"$fields[0]-1\"\t1\t";
+            }
+        }
+        else
+        {
+            print OUT "\t\t\t\t\t\t\t";
+        }
+                
+        if(!$haploid || $SAMPLE{$sample}{GENDER} eq 'female')
+        {           
+            for my $col (1..$#fields)
+            {
+                $allele = $fields[$col];
+                if ($allele==0)
+                {
+                    print OUT "A";
+                }
+                elsif ($allele==1)
+                {
+                    print OUT "B";
+                }
+                elsif ($allele==2)
+                {
+                    print OUT "B";
+                }
+                elsif ($allele==-1)
+                {
+                    print OUT "?";
+                }
+                else
+                {
+                    die "Unrecognised genotype: $allele";
+                }
+            }
+            print OUT "\n";
+        }
+    }
+    
+    print OUT "\t}\n\n";
+}
+
+close(GT);
+close(OUT);

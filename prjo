@@ -1,0 +1,103 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use fralib;
+use POSIX qw(ceil floor);
+use File::Path;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+prjo - process runjobs output
+
+=head1 SYNOPSIS
+
+    usage: prjo <filename>
+	
+    -h displays this help
+    	
+    example: prjo pscalare.log
+             
+    Generates a timings file from the completed timings in the log to STDOUT.
+    
+    todo:  add uncompleted jobs too!
+    
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help) 
+   || $help || $#ARGV != 0)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my $runjobsLogFile = $ARGV[0];
+
+#Process runjobs file
+my %JOBS;
+my @ID;
+
+open(IN, $runjobsLogFile) || die "Cannot open $runjobsLogFile\n";
+while(<IN>)
+{
+    s/\r?\n?$//;
+    
+#    2011/06/13 12:43:13 : Issuing [18919] (1 of 63, ? secs left): /net/fantasia/home/atks/samtools-0.1.12a/samtools mpileup -r 20:0000000-1000000 -P ILLUMINA -ugf /share/swg/hmkang/data/ref/GRCh37.1KG/human.g1k.v37.fa /net/fantasia/home/atks/20110612-1514samples-chr20-t2dgo-samtools-indel/data/*.bam | /net/fantasia/home/atks/samtools-0.1.12a/bcftools/bcftools view -vc - | bgzip -c > /net/fantasia/home/atks/1514samples_t2dgo_chr20_000000_1000000.vcf.gz
+#2011/06/13 17:23:13 : Command [18919] complete RC=0 Runtime=16800 secs: /net/fantasia/home/atks/samtools-0.1.12a/samtools mpileup -r 20:0000000-1000000 -P ILLUMINA -ugf /share/swg/hmkang/data/ref/GRCh37.1KG/human.g1k.v37.fa /net/fantasia/home/atks/20110612-1514samples-chr20-t2dgo-samtools-indel/data/*.bam | /net/fantasia/home/atks/samtools-0.1.12a/bcftools/bcftools view -vc - | bgzip -c > /net/fantasia/home/atks/1514samples_t2dgo_chr20_000000_1000000.vcf.gz
+
+    
+    if (/Issuing \[(\d+)\]/)
+    {
+    	my $id = $1;
+    	push(@ID, $id);
+    	
+    	$_=~/(.+) : Issuing/;
+    	
+    	$JOBS{$id}{START} = $1;
+    }
+    elsif ($_=~/Command \[(\d+)\]/)
+    {
+    	my $id = $1;
+    	
+    	$_=~/(.+) : Command/;
+    	
+    	$JOBS{$id}{END} = $1;
+
+    	$_=~/Runtime=(\d+)/;
+    	
+    	$JOBS{$id}{DURATION} = $1;
+
+    	$_=~/Runtime=\d+ secs: (.+)/;
+    	
+    	$JOBS{$id}{COMMAND} = $1;
+	}
+}
+close(IN);
+
+#Output Summary File
+open(OUT, ">$runjobsLogFile.prjo") || die "Cannot open $runjobsLogFile.prjo\n";
+print OUT "id\tstart\tend\tduration_sec\tduration_min\tduration_hr\tcommand\n";
+for my $id (@ID)
+{
+	my $min = $JOBS{$id}{DURATION}/60;
+	my $hr = $min/60;
+	print OUT "$id\t$JOBS{$id}{START}\t$JOBS{$id}{END}\t$JOBS{$id}{DURATION}\t$min\t$hr\t$JOBS{$id}{COMMAND}\n";
+}
+close(OUT);

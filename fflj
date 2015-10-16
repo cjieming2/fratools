@@ -1,0 +1,185 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+fflj
+
+=head1 SYNOPSIS
+
+ fflj [options] mk-file	
+
+  -h       help
+  -l	   selected markers
+  -f       flanking SNPs to report (default 5)
+  mk-file  mk-file
+  
+  example: fflj -l selected-snps.mk pscalare.mk
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $flankNo = 5;
+my $selectedMkFile;
+my $mkFile;
+my %CHROM;
+my %CHROMOSOME_ORDER;
+my %SELECTED_SNP;
+my %SNP;
+my $headerProcessed;
+my $colNo;
+my %label2col;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'f=i'=>\$flankNo, 'l=s'=>\$selectedMkFile)
+	||  !defined($selectedMkFile) || $flankNo<0 || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$mkFile = $ARGV[0];
+
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('snp-id', 'chromosome', 'position')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2col{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $mkFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        
+        my $snpID = $fields[$label2col{'snp-id'}];
+        my $chromosome = $fields[$label2col{'chromosome'}];
+        my $position = $fields[$label2col{'position'}];
+                        
+        $CHROM{$chromosome}{$position} = $snpID;
+        
+        if(!defined($CHROMOSOME_ORDER{$chromosome}))
+        {
+        	$CHROMOSOME_ORDER{$chromosome} = ();
+        }
+        
+        push(@{$CHROMOSOME_ORDER{$chromosome}}, $position);
+        
+        $SNP{$snpID} = 1;      
+    }
+}
+close(MK);
+
+for my $chromosome (keys(%CHROM))
+{
+	@{$CHROMOSOME_ORDER{$chromosome}} = sort {$a<=>$b} @{$CHROMOSOME_ORDER{$chromosome}};
+}
+
+open(SELECTED_MK, $selectedMkFile) || die "Cannot open $selectedMkFile";
+$headerProcessed = 0;
+SELECT_SNP_LOOP: while(<SELECTED_MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('snp-id', 'chromosome', 'position')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2col{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $selectedMkFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $snpID = $fields[$label2col{'snp-id'}];
+        my $chromosome = $fields[$label2col{'chromosome'}];
+        my $position = $fields[$label2col{'position'}];
+                        
+        if(exists($SNP{$snpID}))
+        {
+        	print "$snpID\t$chromosome\t$position\n\n";
+        }
+        else
+        {
+	        my $chromSNPNo = scalar(@{$CHROMOSOME_ORDER{$chromosome}})-1;
+	        
+	        for my $i (0 .. $chromSNPNo-1)
+	        {
+	        	my $coordinate = $CHROMOSOME_ORDER{$chromosome}[$i];
+	        	
+	        	if ($coordinate>$position)
+	        	{
+	        		for my $upstream (max($i-5, 0) .. max(0,$i-1))
+	        		{
+	        			$coordinate = $CHROMOSOME_ORDER{$chromosome}[$upstream];
+	        			print "\t$CHROM{$chromosome}{$coordinate}\t$chromosome\t$coordinate\n";
+	        		}
+	        		
+	        		print "$snpID\t$chromosome\t$position\n";
+	        		
+	        		for my $downstream  ($i .. min($i+4, $chromSNPNo-1))
+	        		{
+	        			$coordinate = $CHROMOSOME_ORDER{$chromosome}[$downstream];
+	        			print "\t$CHROM{$chromosome}{$coordinate}\t$chromosome\t$coordinate\n";
+	        		}
+	        		
+	        		print "\n";
+	        		
+	        		next SELECT_SNP_LOOP;
+	        	}
+	    	}
+    	}
+    }
+}
+close(SELECTED_MK);

@@ -1,0 +1,130 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX;
+
+=head1 NAME
+
+relpair2sar
+
+=head1 SYNOPSIS
+
+ relpair2sar [options] relpair-out-file 
+
+  -h                help
+  -s                output sar-file
+  relpair-out-file  file
+ 
+ example: relpair2sar *.out
+         
+ Extracts relative pairs from relpair output files.
+ 
+ It will be convenient to use fselect to outer join relpair and plink results:
+ fselect a.sample-pair-id, a.sample-id-1, a.sample-id-2, a.relationship, a.frequency, b.relationship, b.z0, b.z1, b.z2, b.kinship-coefficient, b.rss from pscalare.sar outer join paltum.sar where a.sample-pair-id=b.sample-pair-id
+
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $colNo;
+my %label2Column;
+
+#data structures
+my $sarFile;
+my $headerProcessed;
+my %SAMPLE_PAIR;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 's=s'=>\$sarFile) || scalar(@ARGV)<1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my $relpairHeader = <<RELPAIR_HEADER;
+ ***************************************************** 
+ ******* RELPAIR VERSION 2.0.1, JUNE 13, 2004 ******** 
+ *** WRITTEN BY WILLIAM L. DUREN, MICHAEL EPSTEIN, *** 
+ ********** MINGYAO LI AND MICHAEL BOEHNKE *********** 
+ ***************************************************** 
+RELPAIR_HEADER
+
+$relpairHeader =~ s/([*\n.])/\\$1/g;
+
+for my $relpairOutFile (@ARGV)
+{
+	open(RELPAIR_OUT_FILE, $relpairOutFile) || die "Cannot open $relpairOutFile";
+	$headerProcessed = 0;
+	local $/;
+	my $relpairOutFileContent = <RELPAIR_OUT_FILE>;
+	close(RELPAIR_OUT_FILE);
+		
+	if ($relpairOutFile!~/\.out$/)
+	{
+		warn "$relpairOutFile does not have an \"out\" extension";
+		next;
+	}
+	elsif ($relpairOutFileContent!~/$relpairHeader/m)
+	{
+		warn "$relpairOutFile does not contain the relevant header";
+		next;
+	}
+	
+	if(!defined($sarFile))
+	{
+		my ($name, $path, $ext) = fileparse($relpairOutFile, '\..*');
+		$sarFile = "$name.sar";
+	}
+
+	while($relpairOutFileContent=~/\n (FAM[^\n]+)(?=\n)/g)
+	{
+		my @fields = split(/\s+/, $1, -1);
+		
+		if (scalar(@fields)>=6)
+		{
+			my $sampleID1 = $fields[1];
+	        my $sampleID2 = $fields[3];
+	        my $relationship = $fields[5];
+	        
+	        my $samplePair = join('/', sort(($sampleID1, $sampleID2)));
+	        
+	        $SAMPLE_PAIR{$samplePair}{$relationship}++;
+		}
+		else
+		{
+			die "too few fields!!!!!";
+		}
+	}
+}
+
+if (defined($sarFile))
+{
+	open(SAR, ">$sarFile") || die "Cannot open $sarFile";
+	print SAR "sample-pair-id\tsample-id-1\tsample-id-2\trelationship\tfrequency\n";	
+	for my $samplePair (keys(%SAMPLE_PAIR))
+	{
+		my @samples = split('/', $samplePair);
+	
+		for my $relationship (keys(%{$SAMPLE_PAIR{$samplePair}}))
+		{
+			print SAR "$samplePair\t$samples[0]\t$samples[1]\t$relationship\t$SAMPLE_PAIR{$samplePair}{$relationship}\n";		
+		}
+	}
+	close(SAR);
+}

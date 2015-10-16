@@ -1,0 +1,400 @@
+#!/usr/bin/perl 
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX qw(ceil floor);
+
+=head1 NAME
+
+ftrendtestpluspermutation
+
+=head1 SYNOPSIS
+
+ ftrendtestpluspermutation [options] <tg-file> 
+
+  -h      help
+  -p      permutations (default 1000)
+  -o      out-file base name
+  -s      sa-File
+          i)sample-id
+          ii)affection
+  tg-file tg file
+          
+ example: ftrendtestpluspermutation pscalare.tg -s pscalare.sa
+          ftrendtestpluspermutation pscalare.tg -s pscalare.sa -o 1
+          
+ Calculates Trend Test and adds a permutation test.
+ Outputs trend-<base-name>.mk and perm-<base-name>.txt. 
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $mkFile;
+my $testFile;
+my $permFile;
+my $saFile;
+my $tgFile;
+my $outFileBase;
+my $colNo;
+my $headerProcessed;
+my %label2Column;
+my @column2Label;
+my %SAMPLE;
+my $maxChisq = -1;
+my $dieFlag;
+my @samplesWithUnknownAffectionStatus = ();
+my $permutationNo = 1000;
+my @phenotypes;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 's=s'=>\$saFile, 'o=s'=>\$outFileBase, 'p=i'=>\$permutationNo) 
+   || !defined($saFile)
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$tgFile = $ARGV[0];
+
+isTg($tgFile) || die "$tgFile not a tg-file";
+
+open(SA, $saFile) || die "Cannot open $saFile";
+$headerProcessed = 0;
+
+while(<SA>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		SEARCH_LABEL: for my $label('sample-id', 'affection')
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $label)
+				{			
+					$label2Column{$label}=$col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			die "Cannot find '$label' in $mkFile";
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		my $sampleID = $fields[$label2Column{'sample-id'}];
+        my $affection = $fields[$label2Column{'affection'}];
+        
+        $SAMPLE{$sampleID}{AFFECTION} = $affection;
+	}
+}
+close(SA);
+
+my ($name, $dir, $ext) = fileparse($tgFile, '\..*');
+if (!defined($outFileBase))
+{
+    $testFile = "trend-$name.mk";
+}
+else
+{
+    $testFile = "trend-$outFileBase.mk";
+}
+
+open(TEST, ">$testFile") || die "Cannot open $testFile";
+print STDERR "Trend Test File: $testFile\n";
+print TEST "snp-id\tchisq\n";
+
+open(TG, $tgFile) || die "Cannot open $tgFile";
+$headerProcessed = 0;
+while(<TG>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		for my $col (1 .. $#fields)
+		{
+			$column2Label[$col]=$fields[$col];
+			if ($SAMPLE{$fields[$col]}{AFFECTION} eq 'case')
+			{
+			    $phenotypes[$col] = 1;
+		    }
+		    elsif ($SAMPLE{$fields[$col]}{AFFECTION} eq 'control')
+		    {
+		        $phenotypes[$col] = 0;
+		    }
+		    else
+		    {
+		        push(@samplesWithUnknownAffectionStatus, $fields[$col]);
+		        $dieFlag = 1;
+		    }
+		}
+		
+		die join(",", @samplesWithUnknownAffectionStatus) . " do not have known affection status" if $dieFlag; 
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @genotypes = split('\t', $_, $colNo);
+		
+		my $snpID = $genotypes[0];
+        
+        #calculate regular trend test
+        
+        #calculate sum
+        my $psum = 0;
+        my $gsum = 0;
+        my $count = 0;
+        my $ppsum = 0;
+        my $ggsum = 0;
+        my $pgsum = 0; 
+        
+        for my $col (1..$#genotypes)
+        {
+            if ($genotypes[$col]!=-1)
+            {
+                $psum += $phenotypes[$col];
+                $gsum += $genotypes[$col];
+                $ppsum += square($phenotypes[$col]);
+                $ggsum += square($genotypes[$col]);
+                $pgsum += $phenotypes[$col] * $genotypes[$col];
+                ++$count;
+            }
+        }
+        
+        my $pmean = $psum/$count;
+        my $gmean = $gsum/$count;
+                           
+        my $num = $pgsum/$count - $pmean*$gmean;
+        my $denom1 = $ppsum/$count - $pmean*$pmean;
+        my $denom2 = $ggsum/$count - $gmean*$gmean;
+       
+        my $corr = $num / sqrt($denom1*$denom2);       
+        my $chisq = $count * $corr * $corr;
+        
+        print TEST "$snpID\t$chisq\n";
+        
+        $maxChisq = max($maxChisq, $chisq);
+	}
+}
+
+my $totalNoSNPs = $.-1;
+
+close(TEST);
+close(TG);
+
+#PERMUTATION TEST
+
+#generate permutations
+my $caseNo;
+my $controlNo;
+my $N = $#phenotypes;
+my $originalPermutationString = "";
+my $permutationString = "";
+my %PERMUTATIONS;
+
+map {$caseNo+=$phenotypes[$_]; $originalPermutationString .= $phenotypes[$_]} (1..$#phenotypes);
+$controlNo = scalar(@phenotypes) - 1 - $caseNo;
+
+print STDERR "Max Chisq: $maxChisq\n";
+print STDERR "case: $caseNo\n";
+print STDERR "control: $controlNo\n";
+print STDERR "permutations: $permutationNo\n";
+print STDERR "No. of samples: " . length($originalPermutationString) . "\n";
+
+print STDERR "Generating permutations\n";
+$PERMUTATIONS{$originalPermutationString} = 1;
+my $permutationsGenerated = 0;
+
+my @permutation;
+while ($permutationsGenerated != $permutationNo)
+{
+    for my $col (0..$#phenotypes-1)
+    {
+        $permutation[$col] = 0;
+    }
+    
+    my $caseNoCount = 0;
+    my $i;
+    while ($caseNoCount!=$caseNo)
+    {
+        $i = int(rand($N));
+        if ($permutation[$i]==0)
+        {
+            $permutation[$i]=1;
+            $caseNoCount++;
+        }
+    }
+    
+    $permutationString = join("", @permutation);
+    if (!exists($PERMUTATIONS{$permutationString}))
+    {
+        $PERMUTATIONS{$permutationString} = 1;
+        $permutationsGenerated++;
+    }
+}
+
+#remove original permutation
+delete($PERMUTATIONS{$originalPermutationString});
+
+print STDERR "Inspecting permutations\n";
+my @permutationDistribution;
+
+for my $permutation (keys(%PERMUTATIONS))
+{
+    my @permutation = split("", $permutation);
+    
+    for my $col (0 .. $#permutation)
+    {
+        $permutationDistribution[$col] += $permutation[$col];
+    }
+}
+
+#print "count\n";
+#map {print "$_\n"} @permutationDistribution;
+
+my @orderedPermutations;
+my @maxChisqs;
+my $i=0;
+for my $permutation (keys(%PERMUTATIONS))
+{
+    my @permutation = split('', $permutation);
+    unshift(@permutation, 'dummy');
+    $orderedPermutations[$i] = \@permutation;
+    $maxChisqs[$i] = -1;
+    $i++;
+}
+
+open(TG, $tgFile) || die "Cannot open $tgFile";
+$headerProcessed = 0;
+while(<TG>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @genotypes = split('\t', $_, $colNo);
+		
+		my $snpID = $genotypes[0];
+        
+        print STDERR "\rProcessing " . ($.-1) . " /$totalNoSNPs";
+        
+        for my $i (0 .. $#orderedPermutations)
+        {
+            if ($maxChisqs[$i]<=$maxChisq)
+            {
+                #calculate regular trend test
+                
+                #calculate sum
+                my $psum = 0;
+                my $gsum = 0;
+                my $count = 0;
+                my $ppsum = 0;
+                my $ggsum = 0;
+                my $pgsum = 0; 
+                
+                my @phenotypes = @{$orderedPermutations[$i]};
+                
+                for my $col (1..$#genotypes)
+                {
+                    if ($genotypes[$col]!=-1)
+                    {
+                        $psum += $phenotypes[$col];
+                        $gsum += $genotypes[$col];
+                        $ppsum += square($phenotypes[$col]);
+                        $ggsum += square($genotypes[$col]);
+                        $pgsum += $phenotypes[$col] * $genotypes[$col];
+                        ++$count;
+                    }
+                }
+                
+                my $pmean = $psum/$count;
+                my $gmean = $gsum/$count;
+                                   
+                my $num = $pgsum/$count - $pmean*$gmean;
+                my $denom1 = $ppsum/$count - $pmean*$pmean;
+                my $denom2 = $ggsum/$count - $gmean*$gmean;
+               
+                my $corr = $num / sqrt($denom1*$denom2);       
+                my $chisq = $count * $corr * $corr;
+                
+                $maxChisqs[$i] = max($maxChisqs[$i],$chisq);
+            }
+        }
+	}
+}
+
+close(TG);
+
+if (!defined($outFileBase))
+{
+    $permFile = "perm-$name.txt";
+}
+else
+{
+    $permFile = "perm-$outFileBase.txt";
+}
+print STDERR "\nPermutation File: $permFile\n";
+open(PERM, ">$permFile") || die "Cannot open $permFile";
+
+#print out maxChisq for each permutation
+print PERM "permutation\tmax-chisq\n"; 
+for my $col (0..$#orderedPermutations)
+{
+    my @permutation = @{$orderedPermutations[$col]};
+    shift(@permutation);
+    print PERM join("", @permutation) . "\t$maxChisqs[$col]\n";    
+}
+close(PERM);
+
+my $overallP = 0;
+for my $maxPermutationChisq (@maxChisqs)
+{
+    ++$overallP if ($maxPermutationChisq>$maxChisq);
+}
+
+$overallP /= $permutationNo;
+
+printf STDERR "overallP $overallP(%g)\n", $overallP;
+
+#$testFile = "trend-$name.mk";
+#open(TEST, ">$testFile") || die "Cannot open $testFile";
+#close(TEST);
+
+sub square
+{
+    return $_[0]*$_[0];
+}

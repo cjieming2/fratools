@@ -1,0 +1,105 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use POSIX qw(ceil floor);
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+fsplit
+
+=head1 SYNOPSIS
+
+fsplit [options] <filename>
+  
+    -v  verbose
+    -d  debug
+    -n  number of rows in each split file (inclusive of header) >1 
+    -o  out file name to append split to.
+    
+    usage: fsplit -n 500 pscalare.txt
+    
+    Splits a genotype/table file.
+  
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $n = 0;
+my $outFile;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('n=i'=>\$n, 'o=s'=>\$outFile) 
+    || $n<2 || scalar(@ARGV)==0)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my $file = $ARGV[0];
+
+if (!defined($outFile))
+{
+    my ($name, $dir, $ext) = fileparse($file, '\..*');
+	$outFile = "$name$ext";
+}
+
+open(IN, $file) || die "Cannot open $file\n";
+
+my $header = "";
+my $header_line_count = 0;
+
+while (<IN>)
+{	
+	
+	if (/^#/)
+	{
+	    $header .= $_;
+    	++$header_line_count;
+	}
+	else
+	{
+    	if (($.-$header_line_count)%$n==1)
+    	{
+        	my $tempOutFile = "$outFile" . "_" . ceil(($.-1)/$n) . ".sites.vcf";
+    		#open new file		
+    		open(OUT, ">$tempOutFile") || die "Cannot open $tempOutFile\n";
+    		print OUT $header;
+    	}
+    	
+    	print OUT $_;
+    }
+}
+
+#checks if file is splitted properly
+my $splitFileNo = ceil(($.-$header_line_count)/$n);
+
+close(OUT);
+close(IN);
+
+#checks if file is splitted properly
+my $totalSize = 0;
+for my $i (1..$splitFileNo)
+{
+	$totalSize += -s "$outFile" . "_$i" . ".sites.vcf";
+}
+
+if (-s $file != $totalSize-(($splitFileNo-1)*length($header)))
+{
+	warn "Splitting of $file appears to be corrupted";
+}
+

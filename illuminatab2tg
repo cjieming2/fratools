@@ -1,0 +1,223 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+illuminatab2tg
+
+=head1 SYNOPSIS
+
+ illuminatab2tg [options] <illumina-table-file>	
+
+  -h                   help
+  -o                   output file
+  -m                   marker file
+                       a)snp-id
+                       b)alleles
+  illumina-table-file  sequenome output file
+                       a)SNP Name
+                       b)Sample ID
+                       c)Allele1 - Forward
+                       d)Allele2 - Forward
+           
+  example: illuminatab2tg -o pscalare.tg -m pscalare.mk pscalare.txt
+       
+  Converts a illumina table output file to fra format.
+       
+=head1 DESCRIPTION
+
+=cut
+
+my $help;
+my $ggaFile;
+my $tgFile;
+my $mkFile;
+my $colNo;
+my %SNP_SAMPLE;
+my %SNP;
+my %SAMPLE;
+my $fpos = 0;
+my $snpID = 0;
+my $sampleID = 0;
+my @sortedSNP;
+my @sortedSAMPLE;
+my %label2col;
+my $sampleNo;
+my $snpNo;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'o=s'=>\$tgFile, 'm=s'=>\$mkFile)
+	|| !defined($mkFile)
+	|| scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$ggaFile = $ARGV[0];
+
+if (!defined($tgFile))
+{
+    my ($name, $path, $ext) = fileparse($ggaFile, '\..*');
+	$tgFile = "$name.tg";
+}
+
+open(MK, $mkFile) || die "Cannot open $mkFile\n";
+while (<MK>)
+{
+	s/\r?\n?$//;
+	
+	if($.==1) 
+	{
+       $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+                
+        SEARCH_LABEL: for my $label ('snp-id', 'alleles')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2col{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $mkFile";
+        }
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		
+		my $snp = $fields[$label2col{'snp-id'}];
+		my $alleles = $fields[$label2col{'alleles'}];
+		
+		my @alleles = split("/", $alleles, -1);
+				
+		$SNP{$snp}{"$alleles[0]_$alleles[0]"} = 0;
+		$SNP{$snp}{"$alleles[0]_$alleles[1]"} = 1;
+		$SNP{$snp}{"$alleles[1]_$alleles[1]"} = 2;
+		$SNP{$snp}{"-_-"} = -1;
+	}
+}
+close(MK);
+
+open(IN, $ggaFile) || die "Cannot open $ggaFile\n";
+while (<IN>)
+{
+	s/\r?\n?$//;
+	
+	if($.==1) 
+	{
+       $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+                
+        SEARCH_LABEL: for my $label ('SNP Name', 'Allele1 - Forward', 'Allele2 - Forward', 'Sample ID')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2col{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $ggaFile";
+        }
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		
+		my $snp = $fields[$label2col{'SNP Name'}];
+		my $sample = $fields[$label2col{'Sample ID'}];
+		
+		if (exists($SNP{$snp}))
+		{
+			if(!exists($SNP{$snp}{ID}))
+			{
+				$SNP{$snp}{ID} = ++$snpID;
+				push(@sortedSNP, $snp);		
+			}
+			
+			if(!exists($SAMPLE{$sample}{ID}))
+			{
+				$SAMPLE{$sample}{ID} = ++$sampleID;
+				push(@sortedSAMPLE, $sample);
+			}
+		
+			my $key = "$SNP{$snp}{ID}-$SAMPLE{$sample}{ID}";
+			$SNP_SAMPLE{$key} = $fpos;
+		}
+		else
+		{
+			die "$snp found in $ggaFile but not in $mkFile";
+		}
+	}
+	
+	$fpos += length($_) + 1;
+}
+
+open(OUT, ">$tgFile") || die "Cannot open $tgFile\n";
+
+@sortedSNP = sort(@sortedSNP);
+@sortedSAMPLE = sort(@sortedSAMPLE);
+
+$snpNo = scalar(@sortedSNP);
+$sampleNo = scalar(@sortedSAMPLE);
+
+#check number of rows
+if ($snpNo*$sampleNo+1!=$.)
+{
+	die "$ggaFile expected to have " . ($snpNo*$sampleNo+1) . " rows based on $sampleNo samples and $snpNo SNPs";
+}
+
+print OUT "snp-id\t" . join("\t", @sortedSAMPLE) . "\n";
+
+for my $snp (@sortedSNP)
+{
+	print OUT $snp;	
+	for my $sample (@sortedSAMPLE)
+	{
+		my $key = "$SNP{$snp}{ID}-$SAMPLE{$sample}{ID}";
+
+		seek(IN, $SNP_SAMPLE{$key}, 0);
+		$_ = <IN>;
+		s/\r?\n?$//;
+		
+		my @fields = split('\t', $_, $colNo);
+		my @alleles = ($fields[$label2col{'Allele1 - Forward'}], $fields[$label2col{'Allele2 - Forward'}]);
+		
+		if (exists($SNP{$snp}{"$alleles[0]_$alleles[1]"}))
+		{
+			print OUT "\t" . $SNP{$snp}{"$alleles[0]_$alleles[1]"};
+		}
+		else
+		{
+			die "Conflicting genotype detected: $snp - " . join('_', @alleles) . " vs " . join(',', keys(%{$SNP{$snp}}));
+		}
+	}
+	
+	print OUT "\n";
+}
+
+close(IN);
+close(OUT);

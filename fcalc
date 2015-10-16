@@ -1,0 +1,86 @@
+#!/usr/bin/perl
+
+#use warnings;
+use strict;
+use Getopt::Long;
+use fralib;
+use POSIX qw(ceil floor);
+use File::Path;
+use Pod::Usage;
+
+for my $n (0..200)
+{
+	
+	my $a = ncr(2*$n, $n);
+	my $b = 0;
+	
+	for my $x (0..$n)
+	{
+		my $j = ncr($n, $x);
+		$b += $j*$j;
+	}
+	
+	print "$n)$a\t$b\n";
+	
+}
+
+exit;
+
+
+print "ncr(3,1) = " . ncr(3,1) . "\n";
+print "ncr(10,1) = " . ncr(10,1) . "\n";
+print "ncr(10,9) = " . ncr(10,9) . "\n";
+print "ncr(-3,1) = " . ncr(-3,1) . "\n";
+
+my $p = 1/90;
+my $q = 1- $p;
+my $n = 60;
+
+my $a = 0;
+
+for my $k (0..4)
+{
+	$a += ncr($n,$k)*$p**$k*$q**($n-$k);
+}
+
+my $gte5 = 1-$a;
+my $newyork = 5 * 62 * $gte5;
+my $USA = 10 * 50 * 5 * 62 * $gte5;
+
+print <<STUFF;
+<5       : $a
+>=5      : $gte5
+new york : $newyork
+usa      : $USA
+
+STUFF
+
+sub ncr
+{
+	my ($n, $r) = @_;
+	
+	if ($r==0)
+	{
+		return 1;
+	}
+	elsif ($n<=0)
+	{
+		return 0;
+	}
+	elsif ($r<0)
+	{
+		return 0;
+	}
+	elsif ($r>$n)
+	{
+		return 0;
+	}
+	elsif ($r > $n-$r)
+	{
+		return ncr($n,$n-$r);		
+	}
+	else
+	{
+		return ($n/$r) * ncr($n-1, $r-1);
+	}
+}

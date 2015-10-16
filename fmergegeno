@@ -1,0 +1,328 @@
+#!/usr/bin/perl 
+
+use warnings;
+use strict;
+use Getopt::Long;
+use fralib;
+use File::Basename;
+use POSIX qw(ceil floor);
+use File::Path;
+use Pod::Usage;
+
+=head1 NAME
+
+fmergegeno
+
+=head1 SYNOPSIS
+
+ fmergegeno [options] gt-file
+	
+  -h      help
+  -m      merge list
+          a)sample-id-a
+          b)sample-id-b
+  gt-file sample x marker genotype file
+
+ example: fmergegeno pscalare.gt -m pscalare.sa
+ 
+ Merges the genotype of samples listed in the merge list
+ The merging algorithm is as follows, please note that this is NOT the same as fmerge.
+ a)The genotype of the sample with the better call rate is taken.
+ b)If one of the genotypes is unknown and the other is known, the known genotype is taken.
+ 
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $gtFile;
+my $mergeListFile;
+my $mergedGtFile;
+my $colNo;
+my %label2Column;
+my $filePosition;
+my $headerProcessed;
+my %MERGE;
+my @MERGE_A;
+my @MERGE_B;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions('h'=>\$help, 'o=s'=>\$mergedGtFile, 'm=s'=>\$mergeListFile) 
+   || !defined($mergeListFile) 
+   ||  scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$gtFile = $ARGV[0];
+isGt($gtFile) || die "$gtFile not a gt file";
+
+open(MERGED_LIST, $mergeListFile) || die "Cannot open $mergeListFile";
+$headerProcessed = 0;
+while(<MERGED_LIST>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        	        
+        SEARCH_LABEL: for my $label ('sample-id-a', 'sample-id-b')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+        }
+                        
+        $headerProcessed = 1;
+    }
+    else
+    {
+    	my @fields = split('\t', $_, $colNo);
+    	
+    	$MERGE{$fields[$label2Column{'sample-id-a'}]} = -1;
+    	$MERGE{$fields[$label2Column{'sample-id-b'}]} = -1;
+        push(@MERGE_A, $fields[$label2Column{'sample-id-a'}]);
+        push(@MERGE_B, $fields[$label2Column{'sample-id-b'}]);
+    }
+}
+close(MERGED_LIST);
+
+if(!defined($mergedGtFile))
+{
+	my ($name, $path, $suffix) = fileparse($gtFile, '\..*');
+	$mergedGtFile = "merged-geno-$gtFile";	
+}
+
+open(MERGED_GT, ">$mergedGtFile") || die "Cannot open $mergedGtFile";
+
+open(GT, $gtFile) || die "Cannot open $gtFile\n";
+$headerProcessed = 0;
+while (<GT>)
+{
+	s/\r?\n?$//;
+	
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        print MERGED_GT "$_\n";
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+    	my @fields = split('\t', $_, $colNo);
+
+		my $sampleId = $fields[0];
+		
+		if(exists($MERGE{$sampleId}))
+		{
+			$MERGE{$sampleId} = $filePosition;
+		}
+    }
+    
+    $filePosition = tell(GT);
+}
+
+for my $i (0 .. $#MERGE_A)
+{
+	my $sampleIdA = $MERGE_A[$i];
+	my $sampleIdB = $MERGE_B[$i];
+	 
+	seek(GT, $MERGE{$sampleIdA}, 0) || die "Seek failed";
+	$_ = <GT>;
+	
+	seek(GT, $MERGE{$sampleIdB}, 0) || die "Seek failed";
+	$_ = <GT>;
+}
+
+print "sample-a\tsample-b\tsample-a-call-rate\tsample-b-call-rate\tsample-c-call-rate\tconcordance\tdiscordance\tcomparable\tall-missing\thalf-missing\n";
+
+for my $i (0 .. $#MERGE_A)
+{
+	my $sampleIdA = $MERGE_A[$i];
+	my $sampleIdB = $MERGE_B[$i];
+	
+	print MERGED_GT "$sampleIdA";
+	
+	seek(GT, $MERGE{$sampleIdA}, 0) || die "Seek failed";
+	$_ = <GT>;
+	s/\r?\n?$//;	
+	my @fieldsA = split('\t', $_, $colNo);
+
+	seek(GT, $MERGE{$sampleIdB}, 0) || die "Seek failed";
+	$_ = <GT>;
+	s/\r?\n?$//;		
+	my @fieldsB = split('\t', $_, $colNo);
+	
+	my $sampleA = $fieldsA[0];
+	my $A_AA = 0;
+	my $A_AB = 0;
+	my $A_BB = 0;
+	my $A_NC = 0;
+
+	my $sampleB = $fieldsB[0];
+	my $B_AA = 0;
+	my $B_AB = 0;
+	my $B_BB = 0;
+	my $B_NC = 0;
+	
+	for my $i (1 .. $colNo-1)
+	{
+		my $genotypeA = $fieldsA[$i];
+				
+		if ($genotypeA==0)
+		{
+			$A_AA++;
+		}
+		elsif ($genotypeA==1)
+		{
+			$A_AB++;
+		}
+		elsif ($genotypeA==2)
+		{
+			$A_BB++;
+		}
+		elsif ($genotypeA==-1)
+		{
+			$A_NC++;
+		}
+		
+		my $genotypeB = $fieldsB[$i];
+		
+		if ($genotypeB==0)
+		{
+			$B_AA++;
+		}
+		elsif ($genotypeB==1)
+		{
+			$B_AB++;
+		}
+		elsif ($genotypeB==2)
+		{
+			$B_BB++;
+		}
+		elsif ($genotypeB==-1)
+		{
+			$B_NC++;
+		}
+	}
+	
+	my $sampleCallRateA = ($A_AA+$A_AB+$A_BB)/($A_AA+$A_AB+$A_BB+$A_NC);
+	my $sampleCallRateB = ($B_AA+$B_AB+$B_BB)/($B_AA+$B_AB+$B_BB+$B_NC);
+	my @betterGenotypedSample;
+	my @lesserGenotypedSample;
+	
+	if ($sampleCallRateA>$sampleCallRateB)
+	{
+		@betterGenotypedSample = @fieldsA;
+		@lesserGenotypedSample = @fieldsB;
+	}
+	else
+	{
+		@betterGenotypedSample = @fieldsB;
+		@lesserGenotypedSample = @fieldsA;
+	}
+	
+	my @mergedGenotype = ($sampleA);
+	my $C_AA = 0;
+	my $C_AB = 0;
+	my $C_BB = 0;
+	my $C_NC = 0;
+	my $concordance = 0;
+	my $discordance = 0;
+	my $allMissing = 0;
+	my $halfMissing = 0;
+	
+	for my $i (1 .. $colNo-1)
+	{
+		my $genotypeA = $betterGenotypedSample[$i];
+		my $genotypeB = $lesserGenotypedSample[$i];
+		
+		if($genotypeA==$genotypeB)
+		{
+			push(@mergedGenotype, $genotypeA);
+		
+			if ($genotypeA==-1)
+			{
+				$allMissing++;
+			}
+			else
+			{
+				$concordance++;
+			}
+		}
+		elsif ($genotypeA==-1 or $genotypeB==-1)
+		{
+			if($genotypeA==-1)
+			{
+				push(@mergedGenotype, $genotypeB);
+			}
+			else
+			{
+				push(@mergedGenotype, $genotypeA);
+			}
+			
+			$halfMissing++;
+		}
+		else
+		{
+			push(@mergedGenotype, $genotypeA);
+			$discordance++;
+		}
+		
+		my $genotypeC = $mergedGenotype[$i];
+		
+		if ($genotypeC==0)
+		{
+			$C_AA++;
+		}
+		elsif ($genotypeC==1)
+		{
+			$C_AB++;
+		}
+		elsif ($genotypeC==2)
+		{
+			$C_BB++;
+		}
+		elsif ($genotypeC==-1)
+		{
+			$C_NC++;
+		}
+		
+		print MERGED_GT "\t$genotypeC";
+	}
+
+	print MERGED_GT "\n";
+	
+	my $sampleCallRateC = ($C_AA+$C_AB+$C_BB)/($C_AA+$C_AB+$C_BB+$C_NC);
+	my $comparable = $concordance+$discordance;
+	$concordance /= $comparable;
+	$discordance /= $comparable;
+	$comparable /= $colNo-1;
+	$allMissing /= $colNo-1;
+	$halfMissing /= $colNo-1;		
+		
+	printf "$sampleA\t$sampleB\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\n", $sampleCallRateA, $sampleCallRateB, $sampleCallRateC, $concordance, $discordance, $comparable, $allMissing, $halfMissing;
+}
+
+close(MERGED_GT);
+close(GT);

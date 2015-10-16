@@ -1,0 +1,133 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+autorun
+
+=head1 SYNOPSIS
+
+ autorun [options] <main-command> <file>... 
+
+  -t        test, just print out commands
+  -g        generate logs
+  -filelist list of files
+  -enum     enumerate place holder with numbers
+
+  Note that fileList and enum options are mutually exclusive.
+
+  example: autorun "ftranspose %" *.gt
+           autorun "structure -K % -o %" --enum 2-5
+           autorun "mkdir %_#.txt" --enum 2-5
+           autorun "structure -K % -o %" --filelistenum files.txt
+                
+  Runs jobs sequentially.
+  
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $test;
+my $enumerate;
+my $help;
+my $generateLogs;
+my $fileList;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions('filelist=s'=>\$fileList, 'enum=s'=>\$enumerate, 't'=>\$test, , 'g'=>\$generateLogs) 
+    || (defined($enumerate) && $enumerate!~/(\d+)-(\d+)/ && $1>=$2) 
+    || (defined($enumerate) && defined($fileList))
+    || scalar(@ARGV)==0)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+#replaces special characters in the command
+my $mainCommand = shift(@ARGV);
+
+if(defined $fileList)
+{
+	open(INPUT_FILES, $fileList) || die "Cannot open $fileList";
+
+	$fileList = "";
+	
+    while (<INPUT_FILES>)
+    {
+        chomp;
+        push(@ARGV, $_);
+    }
+}
+
+if(defined $enumerate)
+{
+    if ($enumerate=~/(\d+)-(\d+)/)
+    {
+        @ARGV = ($1 .. $2);
+    }
+}
+
+#iterates through each file
+foreach my $file (@ARGV) 
+{
+    #replaces escape characters in command line argument
+    $file =~ s/&/\\&/g;
+    $file =~ s/ /\\ /g;
+    my ($name, $path, $ext) = fileparse($file, '\..*');
+    my $fileName = "$name$ext";
+
+    #extract main programme name
+    my @mainCommandTokens = split('\s', $mainCommand, 2);
+    my $mainProgramme = $mainCommandTokens[0];
+
+    my $currentMainCommand = $mainCommand;
+    $currentMainCommand =~ s/%/$file/g;
+    if ($enumerate)
+	{
+		my $nplus = $file + 1;
+		$currentMainCommand =~ s/#/$nplus/g;
+	}
+	
+    my $logs = $generateLogs ? "2> $fileName.$mainProgramme.err > $fileName.$mainProgramme.log" : "";
+
+    my $command = "$currentMainCommand $logs";
+        
+    if(!$test)
+    {
+        print "$command\n";
+        system($command) == 0 || warn "system $command failed: $?";
+         
+        if ($? == -1) 
+        {
+            warn "failed to execute: $!\n";
+        }
+        elsif 
+        ($? & 127) 
+        {
+            printf STDERR "child died with signal %d, %s coredump\n", ($? & 127),  ($? & 128) ? 'with' : 'without';
+        }
+        else 
+        {
+            printf STDERR "child exited with value %d\n", $? >> 8;
+        }
+    }
+    else
+    {
+        print "$command\n";
+    }
+}

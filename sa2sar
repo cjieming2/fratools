@@ -1,0 +1,126 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+sa2sar
+
+=head1 SYNOPSIS
+
+ sa2sar [options] sa-file 
+
+  -h     help
+  saFile sa file
+  		 a)sample-id
+  		 b)father
+  		 c)mother
+ 
+ example: sa2sar hapmap.sar
+         
+ Extracts relative pairs from a sa-file.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $saFile;
+my $sarFile;
+my $colNo;
+my %label2Column;
+
+#data structures
+my $headerProcessed;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help) 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$saFile = $ARGV[0];
+
+my($name, $path, $ext) = fileparse($saFile, '\..*');
+$sarFile = "$name.sar";
+		  
+#read sample annotation
+open(SA, $saFile) || die "Cannot open $saFile";
+open(SAR, ">$sarFile") || die "Cannot open $sarFile";
+print SAR "sample-pair-id\tsample-id-1\tsample-id-2\trelationship\n";
+
+$headerProcessed = 0;
+while(<SA>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+         
+        SEARCH_LABEL: for my $label ('sample-id', 'father', 'mother')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $sampleID = $fields[$label2Column{'sample-id'}];
+        my $fatherID = $fields[$label2Column{'father'}];
+        my $motherID = $fields[$label2Column{'mother'}];
+        
+        if ($fatherID ne 'n/a')
+        {
+        	if (($sampleID cmp $fatherID) < 0)
+        	{
+        		print SAR "$sampleID/$fatherID\t$sampleID\t$fatherID\tPO\n";
+        	}
+        	else
+        	{
+        		print SAR "$fatherID/$sampleID\t$fatherID\t$sampleID\tPO\n";        		
+        	}
+        }
+
+        if ($motherID ne 'n/a')
+        {
+        	if (($sampleID cmp $motherID) < 0)
+        	{
+        		print SAR "$sampleID/$motherID\t$sampleID\t$motherID\tPO\n";
+        	}
+        	else
+        	{
+        		print SAR "$motherID/$sampleID\t$motherID\t$sampleID\tPO\n";        		
+        	}
+        }
+    }
+}
+close(SA);
+close(SAR);

@@ -1,0 +1,205 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+affya2mk
+
+=head1 SYNOPSIS
+
+ affya2mk [options] affy-annotation-file
+ 
+  -h                     detailed help message.
+  -dbsnp                 specify the dbSNP version of the annotation
+                         PLEASE note that there exists PERLEGEN SNPs that are not found in dbSNP
+  affy-annotation-file   affymetrix annotation file.
+
+ example: affya2mk pscalare.txt
+
+ Converts Affymetrix annotation (tab delimited) to mk format.
+ Output file is named <affy-annotation-file> with the extension renamed to .mk
+ Please note that this programme does not check for correctness of the field values.
+
+ The extracted fields followed by its new name are:
+ 1)Probe Set ID                    snp-id
+ 2)dbSNP RS ID                     rs-id
+ 3)Chromosome                      chromosome
+ 4)Physical Position               position
+ 5)ChrX pseudo-autosomal           pseudo-autosomal
+   ChrX pseudo-autosomal region 1  pseudo-autosomal
+   ChrX pseudo-autosomal region 2  pseudo-autosomal
+ 6)DB SNP Version                  dbsnp (you will need this to describe the snp annotations)
+ 7)Allele A                        alleles
+ 8)Allele B                        alleles
+ 9)Flank                           flanks
+
+ An additional field - alleles-strand which describes the allele orientation with reference to the flanks is added.
+        
+=head1 DESCRIPTION
+ 
+=cut
+
+my $affyAnnotationFile;
+my $mkFile;
+my $help;
+my $headerProcessed;
+my $colNo;
+my %label2Column;
+my $PARIsSeparate = 0;
+my $globalDBSNPVersion;
+my $annotationFileType = "";
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'dbsnp=i'=>\$globalDBSNPVersion) 
+   || (defined($globalDBSNPVersion) && $globalDBSNPVersion < 0) 
+   || $help 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$affyAnnotationFile = $ARGV[0];
+
+#reads in the GISSNP illumina annotation
+open(AFFY_ANNOTATION, $affyAnnotationFile) || die "Cannot open $affyAnnotationFile\n";
+
+if(!defined($mkFile))
+{
+	my ($name, $dir, $ext) = fileparse($affyAnnotationFile, '\..*');
+	$mkFile = "$name.mk";
+}
+
+$headerProcessed = 0;
+open(MK, ">$mkFile") || die "Cannot open $mkFile\n";
+
+while (<AFFY_ANNOTATION>)
+{
+    s/\r?\n?$//;
+
+    if(!$headerProcessed)
+    {
+next if (/^#/);
+
+    	  print MK "snp-id\trs-id\tchromosome\tstrand\tposition\tpseudo-autosomal\tdbsnp\talleles\talleles-strand\tflanks\n";
+
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        my @labels =  ('Probe Set ID', 'dbSNP RS ID', 'Chromosome', 'Strand', 'DB SNP Version', 'Physical Position',  'ChrX pseudo-autosomal region', 'Flank', 'Allele A', 'Allele B');
+        
+        SEARCH_LABEL: for my $label (@labels)
+        {           
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            if ($label eq 'ChrX pseudo-autosomal region')
+            {
+                $PARIsSeparate = 1;
+                push( @labels, 'ChrX pseudo-autosomal region 1');
+                push( @labels, 'ChrX pseudo-autosomal region 2');
+            }
+            elsif ($label eq 'DB SNP Version' && defined($globalDBSNPVersion))
+            {
+                #use user defined global dbsnp version instead
+            }
+            else
+            {
+                if ($label eq 'DB SNP Version')
+                {
+                    die "Cannot find '$label' in $mkFile, you can circumvent this with the --dbsnp option";
+                }
+                else
+                {
+                    die "Cannot find '$label' in $mkFile";
+                }
+            }
+        }
+
+        $headerProcessed = 1;
+    }
+    else
+    {   
+        my @fields = split('\t', $_, -1);
+        
+        my $snpId = trim($fields[$label2Column{'Probe Set ID'}]);
+        my $rsId = trim($fields[$label2Column{'dbSNP RS ID'}]);
+        my $chromosome = trim($fields[$label2Column{'Chromosome'}]);
+        $chromosome = $chromosome eq 'MT' ? 'M' : $chromosome;
+        my $strand = trim($fields[$label2Column{'Strand'}]);
+        my $dbsnp = defined($globalDBSNPVersion) ? $globalDBSNPVersion : trim($fields[$label2Column{'DB SNP Version'}]);;
+        my $position = trim($fields[$label2Column{'Physical Position'}]);
+        my $pseudoAutosomal;
+        if ($PARIsSeparate)
+        {
+            my $par1 = trim($fields[$label2Column{'ChrX pseudo-autosomal region 1'}]);
+            my $par2 = trim($fields[$label2Column{'ChrX pseudo-autosomal region 2'}]);
+            #print "$snpId\t$par1\t$par2\n";
+            $pseudoAutosomal = ($par1 =~ /0|---/ && $par2 =~ /0|---/)? 0 : 1;
+        }
+        else
+        {
+            $pseudoAutosomal = trim($fields[$label2Column{'ChrX pseudo-autosomal region'}]); 
+        }
+        my $alleleA = trim($fields[$label2Column{'Allele A'}]);
+        my $alleleB = trim($fields[$label2Column{'Allele B'}]);
+        my $alleles = "$alleleA/$alleleB";
+        my $allelesStrand = 'ref';
+        my $flanks = uc(trim($fields[$label2Column{'Flank'}]));
+	
+		if ($rsId eq '---') 
+		{
+		    $rsId = 'n/a';
+		    $dbsnp = 'n/a';
+		}
+		
+		if ($chromosome eq '---') 
+		{
+		    $chromosome = 'n/a';
+		    $position = 'n/a';
+		    $strand = 'n/a';
+		    $pseudoAutosomal = 'n/a';
+		}
+		
+		#handles only biallelic SNPs
+		if ($alleles!~/[ACGT]\/[ACGT]/i)
+		{
+		    warn "$snpId: alleles not valid - $alleles";
+		    $alleles = 'n/a';
+		}
+		
+        if ($flanks!~/([ACGTMRWSYKVHDBNX]*)\[([ACGT]\/[ACGT])\]([ACGTMRWSYKVHDBNX]*)/i
+            || (length($1)==0 && length($3)==0))
+		{
+		    warn "$snpId: flanks not valid - $flanks";
+		    $allelesStrand = 'n/a';
+        $flanks = 'n/a';
+		}
+		    
+        printf MK "$snpId\t$rsId\t$chromosome\t$strand\t$position\t$pseudoAutosomal\t$dbsnp\t$alleles\t$allelesStrand\t$flanks\n";
+    }
+}
+
+close(AFFY_ANNOTATION);
+close(MK);

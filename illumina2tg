@@ -1,0 +1,190 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+illumina2tg
+
+=head1 SYNOPSIS
+
+ illumina2tg [options] <filename>
+  -h  help
+  -m  SNP annotation file
+      a)snp-id
+      b)alleles
+    
+ example: illumina2tg -m pscalare.mk pscalare.txt
+ 
+ Please try and ensure that a marker file has the following fields:
+ 1)snp-id (rs2345) - unique identifier, required for converting to tg format
+ 2)alleles (A/T) - encoding, position matters! required for converting to tg format
+ 3)alleles-strand (opp, ref) - alleles with reference to flanks, required for strand conversion
+ 4)flanks (ACGTACGTAC[T/C]ATGTGTCAGC) - flanks that define the SNP, required for strand conversion
+ 5)dbsnp (126, 127) - useful
+ 6)chromosome (3, 4) - useful
+ 7)position (23142) - useful
+ 
+ Converts a matrix file with [ACGT][ACGT] and --, NN and <blank> encoding to a tgfile.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $snpAnnotationFile;
+my $illuminaGenotypeFile;
+my $genotypeFile;
+my @col2snp;
+my %SNP;
+my $colNo;
+my %anno2col;
+my $headerProcessed;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'm=s'=>\$snpAnnotationFile)
+   || !defined($snpAnnotationFile))
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$illuminaGenotypeFile = $ARGV[0];
+
+open(ANNOTATION, $snpAnnotationFile) || die "Cannot open $snpAnnotationFile";
+$headerProcessed = 0;
+while(<ANNOTATION>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		SEARCH_LABEL: for my $data ('snp-id', 'alleles')
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $data)
+				{			
+					$anno2col{$data}=$col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			die "Cannot find '$data' in $snpAnnotationFile";
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		my $snp = $fields[$anno2col{'snp-id'}];
+		my $allele = $fields[$anno2col{'alleles'}];
+		
+		my @alleles;
+
+		if($allele=~/([ACGT])\/([ACGT])/)
+		{
+			@alleles = ($1, $2);
+    		$SNP{$snp}{"$alleles[0]$alleles[0]"} = 0;
+    		$SNP{$snp}{"$alleles[0]$alleles[1]"} = 1;
+    		$SNP{$snp}{"$alleles[1]$alleles[1]"} = 2;
+		}
+		elsif ($allele=~/([ACGT]+|-)\/([ACGT]+|-)/
+            && ($1 eq '-' xor $2 eq '-'))
+        {
+            if($1 eq '-')
+            {
+                $SNP{$snp}{"DD"} = 0;
+                $SNP{$snp}{"DI"} = 1;
+                $SNP{$snp}{"ID"} = 1;
+                $SNP{$snp}{"II"} = 2;
+            }
+            else
+            {
+                $SNP{$snp}{"II"} = 0;
+                $SNP{$snp}{"ID"} = 1;
+                $SNP{$snp}{"DI"} = 1;
+                $SNP{$snp}{"DD"} = 2;
+            }
+        }
+        else
+        {
+            die "$snp has invalid alleles";
+        }
+	}
+}
+
+open(IN, "$illuminaGenotypeFile") || die "Cannot open $illuminaGenotypeFile\n";
+
+my($name, $path, $ext) = fileparse($illuminaGenotypeFile, '\..*');
+$genotypeFile = "$name.tg";
+open(OUT, ">$genotypeFile") || die "Cannot open $genotypeFile\n";
+$headerProcessed = 0;
+while (<IN>)
+{
+    s/\r?\n?$//;
+   
+    if(!$headerProcessed)
+    {
+    	$colNo = s/\t/\t/g + 1;
+    	
+    	my @fields = split('\t', $_, 2);
+    		
+        print OUT "snp-id\t$fields[1]\n";
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+    	my @fields = split('\t', $_, $colNo);
+    
+        print OUT "$fields[0]";
+
+		my $snp = $fields[0];
+
+		for my $col (1..$#fields)
+		{
+			my $genotype = $fields[$col];
+			
+			if ($genotype ne '--' && $genotype ne '' && $genotype ne 'NN')
+			{				
+				if (exists($SNP{$snp}{$genotype}))
+				{
+					print OUT "\t$SNP{$snp}{$genotype}";
+				}
+				else
+				{
+					warn "Unrecognised $snp genotype: $genotype keys:" . join('/',keys(%{$SNP{$snp}}));
+				}
+			}
+			else
+			{
+				print OUT "\t-1";
+			}
+		}
+
+        print OUT "\n";
+    }
+}
+
+close(OUT);
+close(IN);

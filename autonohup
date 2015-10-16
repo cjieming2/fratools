@@ -1,0 +1,108 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+autonohup
+
+=head1 SYNOPSIS
+
+ autonohup [options] <main-command> <files>...	
+
+  -t            test, just print out commands
+  -enum         enumerate place holder with numbers
+  main-command  command to be executed
+  files         files to be inserted into placeholders
+  
+  example: autonohup "ftranspose %" *.gt
+           autonohup "structure -K % -o %" --enum 2-5
+   
+  Accepts placeholders for a list of files or enumeration              
+  Submits multiple jobs to run in background.
+  DO NOT RUN MORE THAN 5 JOBS AT A TIME!!!!!!!
+         
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $test;
+my $enumerate;
+my $help;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions('enum=s'=>\$enumerate, 't'=>\$test) 
+	|| (defined($enumerate) && ($enumerate!~/(\d+)-(\d+)/ || $1>=$2 || $1<0))
+	|| scalar(@ARGV)==0)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+#replaces special characters in the command
+my $mainCommand = shift(@ARGV);
+$mainCommand =~ s/\$/\\\$/g;
+
+if(defined$enumerate)
+{
+	if ($enumerate=~/(\d+)-(\d+)/)
+	{
+		@ARGV = ($1 .. $2);
+	}
+}
+
+#iterates through each file
+foreach my $file (@ARGV) 
+{
+	#replaces escape characters in command line argument	
+	$file =~ s/&/\\&/g;
+	$file =~ s/ /\\ /g;
+	my ($name, $path, $ext) = fileparse($file, '\..*');
+	my $fileName = "$name$ext";
+
+	#extract main programme name
+	my @mainCommandTokens = split('\s', $mainCommand, 2);
+	my $mainProgramme = $mainCommandTokens[0];
+
+	my $currentMainCommand = $mainCommand;
+	$currentMainCommand =~ s/%/$file/g;
+
+	my $command = "nohup $currentMainCommand 2> $fileName.$mainProgramme.err > $fileName.$mainProgramme.log &";
+		
+	if(!$test)
+	{
+		system($command) == 0 || die "system $command failed: $?";
+		 
+		if ($? == -1) 
+		{
+			warn "failed to execute: $!\n";
+	    }
+	    elsif 
+	    ($? & 127) 
+	    {
+			printf STDERR "child died with signal %d, %s coredump\n", ($? & 127),  ($? & 128) ? 'with' : 'without';
+	    }
+	    else 
+	    {
+			printf STDERR "child exited with value %d\n", $? >> 8;
+	    }
+	}
+	else
+	{
+		print STDERR "$command\n";
+	}
+}

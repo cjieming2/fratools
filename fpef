@@ -1,0 +1,120 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+fpef
+
+=head1 SYNOPSIS
+
+ fpef [options] <sa-file or mk-file> 
+
+  -h         help
+  sa/mk-file annotation file
+ 
+ example: fpef pscalare.mk
+         
+ Populates empty fields with 'n/a'.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $annotationFile;
+my $pefAnnotationFile;
+my $columnNo;
+my $rowNo;
+my $emptyFieldCount;
+my $headerProcessed;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help) 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$annotationFile = $ARGV[0];
+
+if(!defined($pefAnnotationFile))  
+{
+  my($name, $path, $ext) = fileparse($annotationFile, '\..*');
+  $pefAnnotationFile = "pef-$name$ext";
+}
+
+#read sample annotation
+open(ANNOTATION, $annotationFile) || die "Cannot open $annotationFile";
+$headerProcessed = 0;
+$emptyFieldCount = 0;
+open(PEF_ANNOTATION, ">$pefAnnotationFile") || die "Cannot open $pefAnnotationFile";
+
+while(<ANNOTATION>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $columnNo = s/\t/\t/g + 1;
+        
+        print PEF_ANNOTATION "$_\n";
+                
+        $headerProcessed = 1;
+    }
+    else
+    {
+    	$_ = "$_\tdummy";
+    	
+        my @fields = split('\t', $_, -1);
+        
+        if (scalar(@fields)-1!=$columnNo) {die "Number of columns not the same as preceding rows: " . (scalar(@fields)-1) . " vs $columnNo"}
+        
+        for my $col (0 .. $#fields-2)
+        {
+        	if($fields[$col] eq '')
+        	{
+        		print PEF_ANNOTATION "n/a\t";
+        		$emptyFieldCount++;
+        	}
+        	else
+        	{
+        		print PEF_ANNOTATION "$fields[$col]\t";
+        	}
+        }
+        
+        if($fields[$#fields-1] eq '')
+    	{
+    		print PEF_ANNOTATION "n/a\n";
+    		$emptyFieldCount++;
+    	}
+    	else
+    	{
+    		print PEF_ANNOTATION "$fields[$#fields-1]\n";
+    	}    
+    }
+}
+
+$rowNo = $.;
+close(ANNOTATION);
+close(PEF_ANNOTATION);
+
+print STDERR "Number of columns: $columnNo\n";
+print STDERR "Number of rows: $rowNo\n";
+print STDERR "Number of empty fields: $emptyFieldCount\n";
+print STDERR "Written to $pefAnnotationFile\n";

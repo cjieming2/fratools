@@ -1,0 +1,151 @@
+#!/usr/bin/perl 
+
+use warnings;
+use strict;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX qw(ceil floor);
+
+=head1 NAME
+
+fextractmarkersinexome
+
+=head1 SYNOPSIS
+
+ fextractmarkersinexome [options] <vcf-file> 
+
+  -h       help
+  -w       window size (0 default) [0,1M]
+  -k       UCSC known genes
+  vcf-file VCF file
+           
+ example: fextractmarkersinexome pscalare.vcf --ref refGenes.txt.gz -w 10000
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $refGenesFile;
+my $vcfFile;
+my $windowSize = 0;
+my $colNo;
+my $headerProcessed;
+my %SNP;
+my %CHROM;
+my @GENES;
+my %label2Column;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions('h'=>\$help, 'w=i'=>\$windowSize, 'ref=s'=>\$refGenesFile) 
+   || $windowSize < 0 
+   || $windowSize > 1000000 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$vcfFile = $ARGV[0];
+
+if(`gzip -t $refGenesFile` eq "")
+{
+	open(REF, "gunzip -c $refGenesFile |") || die "can't open pipe to $refGenesFile";
+}
+else
+{
+	open(REF, $refGenesFile) || die "can't open $refGenesFile";
+}
+
+$headerProcessed = 0;
+
+#read in exonic regions
+while(<REF>)
+{
+	s/\r?\n?$//;
+	
+	#585     NR_024540       chr1    -       14361   29370   29370   29370   11      14361,14969,15795,16606,16857,17232,17605,17914,18267,24737,29320,      14829,15038,15947,16765,17055,17368,17742,18061,18366,24891,29370,        0       WASH7P  unk     unk     -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+
+	my @fields = split('\t', $_);
+
+	my $chromosome = $fields[2];
+	my $gene = $fields[1];
+    
+    if (!exists($CHROM{$chromosome}))
+    {
+    	@{$CHROM{$chromosome}} = ();
+    }
+    else
+    {
+    	#print "$_\n";
+    	my %GENE = ();
+    	$GENE{TXSTART} = $fields[4];
+	    $GENE{TXEND} = $fields[5];
+	    $GENE{EXONSTART} = $fields[9];
+	    $GENE{EXONEND} = $fields[10];
+	    
+	    push(@{$CHROM{$chromosome}}, \%GENE);
+    }
+}
+close(REF);
+
+for my $chromosome (keys(%CHROM))
+{
+	my @GENES = @{$CHROM{$chromosome}};
+
+	for my $i (0 .. $#GENES)
+	{
+		my $start = $GENES[$i]{TXSTART};
+	    
+		print "this $start\n";
+	}
+}
+
+if(`gzip -t $vcfFile` eq "")
+{
+	open(REF, "gunzip -c $vcfFile |") || die "can't open pipe to $vcfFile";
+}
+else
+{
+	open(REF, $vcfFile) || die "can't open $vcfFile";
+}
+
+#read in markers
+while(<VCF>)
+{
+	s/\r?\n?$//;
+	
+	#585     NR_024540       chr1    -       14361   29370   29370   29370   11      14361,14969,15795,16606,16857,17232,17605,17914,18267,24737,29320,      14829,15038,15947,16765,17055,17368,17742,18061,18366,24891,29370,        0       WASH7P  unk     unk     -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+
+	my @fields = split('\t', $_);
+
+	my $chromosome = $fields[2];
+	my $gene = $fields[1];
+    
+    if (!exists($CHROM{$chromosome}))
+    {
+    	@{$CHROM{$chromosome}} = ();
+    }
+    else
+    {
+    	#print "$_\n";
+    	my %GENE = ();
+    	$GENE{TXSTART} = $fields[4];
+	    $GENE{TXEND} = $fields[5];
+	    $GENE{EXONSTART} = $fields[9];
+	    $GENE{EXONEND} = $fields[10];
+	    
+	    push(@{$CHROM{$chromosome}}, \%GENE);
+    }
+}
+close(VCF);

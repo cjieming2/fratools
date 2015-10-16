@@ -1,0 +1,184 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+hapmap2tg
+
+=head1 SYNOPSIS
+
+ hapmap2tg [options] hg-files...
+
+  -h     help
+  -o     output root file name (default hapmap-panel)
+  hg-files hapmap-genotype-files
+
+ example: hapmap2tg genotype_chr1_ASW.txt genotype_chr2_ASW.txt ...
+          hapmap2tg -o asw genotype_chr1_ASW.txt genotype_chr2_ASW.txt ...
+
+ Converts hapmap genotype files to tg and marker files.
+ The output files will be <output-root-file-name>.tg and
+ <output-root-file-name>.mk
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $tgFile;
+my $mkFile;
+my $outputRootFileName;
+my $colNo;
+my %label2Column;
+
+#data structures
+my %SAMPLE;
+my %SNP;
+my @samples;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'o=s'=>\$outputRootFileName)
+   || scalar(@ARGV) ==0)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+for my $i (0 .. $#ARGV)
+{
+	my $file = $ARGV[$i];
+	open(HAPMAP, $file) || die "Cannot open $file";
+
+	while (<HAPMAP>)
+	{
+		s/\r?\n?$//;
+
+		my @fields = split(" ", $_, -1);
+
+		if($.==1)
+		{
+			$colNo = s/\t/\t/g + 1;
+
+			if ($i==0)
+			{
+				#reads in the first hapmap genotype file and takes note of the
+				#order of the samples.
+
+				@samples = @fields;
+
+				if(defined($outputRootFileName))
+				{
+					$tgFile = "$outputRootFileName.tg";
+					$mkFile = "$outputRootFileName.mk";
+				}
+				else
+				{
+					$tgFile = "hapmap-panel.tg";
+					$mkFile = "hapmap-panel.mk";
+				}
+
+				open(TG, ">$tgFile") || die "Cannot open $tgFile";
+				open(MK, ">$mkFile") || die "Cannot open $mkFile";
+
+				print TG "snp-id";
+				for my $col (11 .. $#fields)
+				{
+					print TG "\t$fields[$col]";
+				}
+				print TG "\n";
+
+				print MK "snp-id\tchromosome\tposition\tstrand\talleles\tbuild\tgenotyping-center\tprotocol\tassay\tpanel\tqc-code\n";
+
+			}
+			else
+			{
+				if($colNo != s/\t/\t/g + 1)
+				{
+					die "Column numbers not consistent";
+				}
+
+				#subsequent reads of the following files will check that the
+				#samples are in order.
+
+				for my $col (0 .. $#fields)
+				{
+					die "Headers not the same: $fields[$col] and $samples[$col]" if $fields[$col] ne  $samples[$col];
+				}
+			}
+		}
+		else
+		{
+			my $snp = $fields[0];
+
+			if (exists($SNP{$fields[0]}))
+			{
+				die "SNP $fields[0] already exists";
+			}
+
+			my @alleles = split("/", $fields[1]);
+			my $chromosome = $fields[2];
+			$chromosome =~ s/chr//;
+			my $position = $fields[3];
+			my $strand = $fields[4];
+			my $build = $fields[5];
+			my $genotypingCenter = $fields[6];
+			my $protocol = $fields[7];
+			my $assay = $fields[8];
+			my $panel = $fields[9];
+			my $qcCode = $fields[10];
+
+			print MK "$snp\t$chromosome\t$position\t$strand\t$alleles[0]/$alleles[1]\t$build\t$genotypingCenter\t$protocol\t$assay\t$panel\t$qcCode\n";
+
+			my $AA = "$alleles[0]$alleles[0]";
+			my $AB = "$alleles[0]$alleles[1]";
+			my $BB = "$alleles[1]$alleles[1]";
+			my $NN = "NN";
+
+			print TG "$snp";
+			for my $col (11 .. $#fields)
+			{
+				my $genotype = $fields[$col];
+
+				if ($genotype eq $AA)
+				{
+					print TG "\t0";
+				}
+				elsif ($genotype eq $AB)
+				{
+					print TG "\t1";
+				}
+				elsif ($genotype eq $BB)
+				{
+					print TG "\t2";
+				}
+				elsif ($genotype eq $NN)
+				{
+					print TG "\t-1";
+				}
+				else
+				{
+					warn "Genotype $genotype not recognised for $snp";
+				}
+			}
+			print TG "\n";
+		}
+	}
+
+	close(HAPMAP);
+}
+

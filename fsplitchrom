@@ -1,0 +1,258 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+fsplitchrom
+
+=head1 SYNOPSIS
+
+ fsplitchrom [options] <tg-file> 
+
+  -h      help
+  -m      marker file
+          a)snp-id
+          b)chromosome
+          c)position
+  -n      maximum number of SNPs to be in 1 file
+  tg-file tg file
+ 
+ example: fsplitchrom -m pscalare.mk pscalare.tg 
+          fsplitchrom -n 100 -m pscalare.mk pscalare.tg 
+ 
+ SNPs which map to the same location are also included.
+ SNPs whose (chromosome, position) are unknown or partially unknown will be dropped.
+ SNP set in tg-file MUST be a subset of SNPs in mk-file.
+         
+ Splits a tg file into mutually exclusive subsets by chromosome, SNPs are ordered by chromosomal position.
+ Files are named:
+ if maximum number of SNPs is not defined
+   chr1-pscalare.tg
+   chr2-pscalare.tg
+   ...
+ if maximum number of SNPs is defined
+   chr1-1-pscalare.tg
+   chr1-2-pscalare.tg
+   ...
+   chrX-4-pscalare.tg
+   chrX-5-pscalare.tg
+     
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $tgFile;
+my $mkFile;
+my $colNo;
+my $headerProcessed;
+my %CHROM; #CHROMOSOME-(POSITION->snp|SNPS->@snp)
+my %SNP; #SNP-(CHROMOSOME->chromosome|POSITION->position|FPOS->fileposition)
+my %REDUNDANT_LOCUS_SNP; #SNP
+my %UNMAPPED_SNP; #SNP
+my $filePosition;
+my %label2Column;
+my $maxSNP;
+my $fileNo = '';
+my $mkAndTg = 0;
+my $mkCount = 0;
+my $unMappedCount = 0;
+my $manyToOneLocusCount = 0;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'm=s'=>\$mkFile, 'n=i'=>\$maxSNP) 
+   || !defined($mkFile) 
+   || (defined($maxSNP) && $maxSNP < 1)
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my $maxSNPNo = !defined($maxSNP) ? 'unlimited' : $maxSNP;
+
+print STDERR <<SUMMARY;
+=======
+options
+=======
+Maximum no. of SNPs per file: $maxSNPNo
+=======
+SUMMARY
+
+$tgFile = $ARGV[0];
+isTg($tgFile) || warn "$tgFile not a tg-file";
+
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+
+print STDERR "Reading $mkFile\n";
+
+while(<MK>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		SEARCH_LABEL: for my $label('snp-id', 'chromosome', 'position')
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $label)
+				{			
+					$label2Column{$label}=$col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			die "Cannot find '$label' in $mkFile";
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		my $snpID = $fields[$label2Column{'snp-id'}];
+		my $chromosome = $fields[$label2Column{'chromosome'}];
+		my $position = $fields[$label2Column{'position'}];
+		
+		if (exists($SNP{$snpID}))
+		{
+		    die "$snpID occurs twice in $mkFile!"; 
+		}
+		
+		if ($chromosome ne 'n/a' && $position ne 'n/a')
+        {
+            $SNP{$snpID}{CHROM} = $chromosome;
+            $SNP{$snpID}{POSITION} = $position;
+
+    	    push(@{$CHROM{$chromosome}{SNPS}}, $snpID);
+    			
+    		if(!exists($CHROM{$chromosome}{$position}))
+    		{
+    			$CHROM{$chromosome}{$position} = $snpID;
+    		}
+    		else
+    		{
+    		    $REDUNDANT_LOCUS_SNP{$snpID}{CHROM} = $chromosome;
+    		    $REDUNDANT_LOCUS_SNP{$snpID}{POSITION} = $position; 
+    			$REDUNDANT_LOCUS_SNP{$CHROM{$chromosome}{$position}}{CHROM} = $chromosome;
+    		    $REDUNDANT_LOCUS_SNP{$CHROM{$chromosome}{$position}}{POSITION} = $position;
+    		    $manyToOneLocusCount++;
+    		}
+    		
+    		$mkCount++;
+        }
+        else
+        {
+            $UNMAPPED_SNP{$snpID} = 1;
+            $unMappedCount++;
+        }
+	}
+}
+close(MK);
+
+print STDERR "Scanning $tgFile\n";
+
+#scan through tg file to ensure that 
+open(TG, $tgFile) || die "Cannot open $tgFile";
+$filePosition = 0;
+$headerProcessed = 0;
+while(<TG>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, 2);
+				
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, 2);
+		my $snpID = $fields[0];
+		
+		if (exists($SNP{$snpID}))
+		{
+			$SNP{$snpID}{FPOS} = $filePosition;
+	        $mkAndTg++;
+		}
+		else
+		{
+			die "$snpID occurs in $tgFile but not in $mkFile!";
+		}
+	}
+	
+	$filePosition = tell(TG);
+}
+
+print STDERR "Splitting $tgFile\n";
+my($name, $path, $ext) = fileparse($tgFile, '\..*');
+for my $chromosome (sort {if ("$a$b"=~/\D/) {$a cmp $b} else {$a <=> $b}} keys(%CHROM))
+{
+	my $snpNo = 0;
+
+    for my $snpID (sort {$SNP{$a}{POSITION} <=> $SNP{$b}{POSITION}} @{$CHROM{$chromosome}{SNPS}})
+	{		
+		if ($snpNo==0 || (defined($maxSNP) && $snpNo%$maxSNP==0))
+		{
+			if ($snpNo!=0)
+			{
+				close(CHROM_TG);
+			}
+			
+			if (defined($maxSNP))
+			{
+				$fileNo =  "-" . (int($snpNo/$maxSNP)+1);
+			}
+			
+			my $chromosomeTgFile = "chr$chromosome$fileNo-$name$ext";
+			open(CHROM_TG, ">$chromosomeTgFile") || die "Cannot open $chromosomeTgFile";
+			
+			seek(TG, 0, 0);
+			$_ = <TG>;
+			print CHROM_TG $_;
+		}
+		
+		if (exists($SNP{$snpID}{FPOS}))
+		{
+    		seek(TG, $SNP{$snpID}{FPOS}, 0);
+    		$_ = <TG>;
+    		print CHROM_TG $_;
+    		
+    		$snpNo++;
+	    }
+	}
+	close(CHROM_TG);
+	
+	print STDERR "chr$chromosome SNPs: $snpNo\n";
+}
+
+print STDERR "SNPs in mk-file: $mkCount\n";
+print STDERR "SNPs in tg-file (subset of mk-file) : $mkAndTg\n";
+print STDERR "Unmapped SNPs (dropped): $unMappedCount\n";
+print STDERR "No.of SNPs sharing locations (retained): $manyToOneLocusCount (" . scalar(keys(%REDUNDANT_LOCUS_SNP)) . " loci)\n";
+
+close(TG);

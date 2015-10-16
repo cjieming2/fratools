@@ -1,0 +1,129 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use fralib;
+use File::Basename;
+use POSIX qw(ceil floor);
+use File::Path;
+use Pod::Usage;
+
+=head1 NAME
+
+ucsc2mk
+
+=head1 SYNOPSIS
+
+ ucsc2mk
+    
+  -h         help
+  ucsc-file  file name of ucsc file 
+
+ example: ucsc2mk snp125.txt
+ 
+ Extracts biallelic SNPs with non-random chromosome position.
+ 
+ a)snp-id
+ b)chromosome
+ c)position             
+
+ Data in snp*.txt file is expected to be without a header and is 
+ decribed as below
+ 
+  1) bin                     10) observed       
+  2) chrom                   11) molType        
+  3) chromStart              12) class          
+  4) chromEnd                13) valid          
+  5) name                    14) avHet          
+  6) score                   15) avHetSE        
+  7) strand                  16) funcset        
+  8) refNCBI                 17) locType        
+  9) refUCSC                 18) weight         
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions('h'=>\$help) 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my %SNP = ();
+my %CLASHSNP = ();
+my $ucscFile = $ARGV[0];
+my $mkFile = $ucscFile;
+$mkFile =~ s/\..*/\.mk/i;
+my $totalSNPNo = 0;
+my $clashSNPNo = 0;
+
+open(UCSC, $ucscFile) || die "Cannot open $ucscFile";
+
+while(<UCSC>)
+{
+    s/\r?\n?$//;
+    
+    my @fields = split('\t', $_);
+    
+    my $snpID = $fields[4];
+    my $chromosome = $fields[1];
+    my $position = $fields[2]+1;
+    my $class = $fields[11];    
+    
+    if (!defined($SNP{$snpID}))
+    {
+    	if ($class eq 'single' && $chromosome !~ /random$/ && !defined($CLASHSNP{$snpID}))
+    	{
+    		$chromosome =~ s/chr//;
+    		$SNP{$snpID}="$chromosome:$position";
+    		$totalSNPNo++;
+    	}
+    }
+    else  
+    {
+    	if ($class eq 'single' && $chromosome !~ /random$/)
+    	{
+    		$chromosome =~ s/chr//;
+    		
+    		if ($SNP{$snpID} ne "$chromosome:$position")
+    		{
+	    		$CLASHSNP{$snpID}=1;
+	    		delete($SNP{$snpID});
+    			$clashSNPNo++;
+    		}
+    	}
+    }    
+}
+close(UCSC);
+
+open(MK, ">$mkFile") || die "Cannot open $mkFile";
+print MK "snp-id\tchromosome\tposition\n";
+for my $snpID (keys(%SNP)) 
+{
+	my $location = $SNP{$snpID};
+	$location =~ /(.+):(\d+)/;  
+	print MK "$snpID\t$1\t$2\n";
+}
+close(MK);
+
+#print statistics
+print <<STATS;
+Total no. of SNPs :        $totalSNPNo
+Total no. of clash SNPs : $clashSNPNo
+
+STATS

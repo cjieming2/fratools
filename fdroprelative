@@ -1,0 +1,388 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX;
+
+=head1 NAME
+
+fdroprelative
+
+=head1 SYNOPSIS
+
+ fdroprelative [options] pscalare.sar 
+
+  -h       help
+  -r       rule for dropping samples
+           i)case-biased
+             a)FS/PO, case-ctrl : drop control
+             b)FS/PO, case-case : drop sample with lower call rate
+             c)FS/PO, ctrl-ctrl : drop sample with lower call rate
+             d)MZ, case-ctrl : drop both
+             e)MZ, case-case : drop sample with lower call rate
+             f)MZ, ctrl-ctrl : drop sample with lower call rate
+  -s       sa-file
+           a)sample-id
+           b)affection
+  -c       sample-call-rate-file
+           a)sample-id
+           b)sample-call-rate
+  sar-file sar-file
+           a)sample-pair-id
+           b)sample-id-1
+           c)sample-id-2
+           d)z0
+           e)z1
+           f)z2
+           g)relationship
+           h)ibd-proportion
+ 
+ example: fdroprelative pscalare.sar
+         
+ Annotates sample-id-1 and sample-id-2 with sample-call-rate and affection information.
+ 
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $colNo;
+my %label2Column;
+
+#data structures
+my $headerProcessed;
+my $sarFile;
+my $annotatedSarFile;
+my $saFile;
+my $saCallRateFile;
+my $droppedSamplesFile;
+my %SAMPLE;
+my %SAMPLE_PAIR;
+my %DROPPED_SAMPLES;
+my $dropRule = 'case-biased';
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 's=s'=>\$saFile, 'c=s'=>\$saCallRateFile, 'r=s'=>\$dropRule) 
+   || $dropRule!~/^(case-biased)$/
+   || !defined($saFile)
+   || !defined($saCallRateFile)
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$sarFile = $ARGV[0];
+
+open(SA, $saFile) || die "Cannot open $saFile";
+$headerProcessed = 0;
+
+while(<SA>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split(/\t/, $_, $colNo);
+         
+        SEARCH_LABEL: for my $label ('sample-id', 'affection')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                { 
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $saFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split(/\t/, $_, $colNo);
+        
+        my $sampleID = $fields[$label2Column{'sample-id'}];
+        my $affection = $fields[$label2Column{'affection'}];
+        #my $sex = $fields[$label2Column{'sex'}];
+
+        $SAMPLE{$sampleID}{AFFECTION} = $affection;
+        #$SAMPLE{$sampleID}{SEX} = $sex;
+    } 
+}
+close(SA);
+
+open(SA_CALL_RATE_FILE, $saCallRateFile) || die "Cannot open $saCallRateFile";
+$headerProcessed = 0;
+
+while(<SA_CALL_RATE_FILE>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split(/\t/, $_, $colNo);
+         
+        SEARCH_LABEL: for my $label ('sample-id', 'sample-call-rate')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                { 
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $saFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split(/\t/, $_, $colNo);
+        
+        my $sampleID = $fields[$label2Column{'sample-id'}];
+        my $sampleCallRate = $fields[$label2Column{'sample-call-rate'}];
+
+        if (exists($SAMPLE{$sampleID}))
+        {
+            $SAMPLE{$sampleID}{CALL_RATE} = $sampleCallRate;
+        }
+        else
+        {
+            die "Missing sample annotation for $sampleID";
+        }
+    } 
+}
+close(SA_CALL_RATE_FILE);
+
+open(SAR, $sarFile) || die "Cannot open $sarFile";
+$headerProcessed = 0;
+
+while(<SAR>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split(/\t/, $_, $colNo);
+         
+        SEARCH_LABEL: for my $label ('sample-pair-id', 'z0', 'z1', 'z2', 'relationship', 'ibd-proportion')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                { 
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $sarFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split(/\t/, $_, $colNo);
+        
+        my $samplePairID = $fields[$label2Column{'sample-pair-id'}];
+        my $sampleID1 = $1;
+        my $sampleID2 = $2;
+        if ($samplePairID =~ /^([^\/]*)\/([^\/]*)$/)
+        {
+            $sampleID1 = $1;
+            $sampleID2 = $2;
+        }
+        else
+        {
+            die "$samplePairID is not valid";
+        }
+        my $z0 = $fields[$label2Column{'z0'}];
+        my $z1 = $fields[$label2Column{'z1'}];
+        my $z2 = $fields[$label2Column{'z2'}];
+        my $relationship = $fields[$label2Column{'relationship'}];
+        my $ibdProportion = $fields[$label2Column{'ibd-proportion'}];
+        
+        if (exists($SAMPLE{$sampleID1}))
+        {
+            $SAMPLE{$sampleID1}{REL}{$sampleID2} = $relationship;
+        }
+        else
+        {
+            die "Missing sample annotation for $sampleID1";
+        }
+        
+        if (exists($SAMPLE{$sampleID2}))
+        {
+            $SAMPLE{$sampleID2}{REL}{$sampleID1} = $relationship;
+        }
+        else
+        {
+            die "Missing sample annotation for $sampleID2";
+        }
+
+        $SAMPLE_PAIR{$samplePairID}{z0} = $z0;
+        $SAMPLE_PAIR{$samplePairID}{z1} = $z1;
+        $SAMPLE_PAIR{$samplePairID}{z2} = $z2;
+        $SAMPLE_PAIR{$samplePairID}{RELATIONSHIP} = $relationship;
+        $SAMPLE_PAIR{$samplePairID}{IBD_PROPORTION} = $ibdProportion;             
+    } 
+}
+close(SAR);
+
+if(!defined($annotatedSarFile))
+{
+    my ($name, $dir, $ext) = fileparse($sarFile, '\..*');
+    $annotatedSarFile = "annotated-$sarFile";
+}
+open(ANNOTATED_SAR, ">$annotatedSarFile") || die "Cannot open $annotatedSarFile";
+
+if(!defined($droppedSamplesFile))
+{
+    my ($name, $dir, $ext) = fileparse($sarFile, '\..*');
+    $droppedSamplesFile = "dropped-samples-$sarFile";
+}
+open(DROPPED_SAMPLES, ">$droppedSamplesFile") || die "Cannot open $droppedSamplesFile";
+
+if ($dropRule eq 'case-biased')
+{
+    #i)case-biased
+    #  a)FS/PO, case-ctrl : drop control
+    #  b)FS/PO, case-case : drop sample with lower call rate
+    #  c)FS/PO, ctrl-ctrl : drop sample with lower call rate
+    #  d)MZ, case-ctrl : drop both
+    #  e)MZ, case-case : drop sample with lower call rate
+    #  f)MZ, ctrl-ctrl : drop sample with lower call rate
+
+    print ANNOTATED_SAR "sample-pair-id\trelationship\tsample-id-1\tsample-id-1-affection\tsample-id-1-call-rate\t" .
+                                        "sample-id-2\tsample-id-2-affection\tsample-id-2-call-rate\tdropped-samples\n";
+                                        
+    print DROPPED_SAMPLES "sample-id\n";                
+}
+                                            
+for my $samplePairID (sort {$SAMPLE_PAIR{$b}{IBD_PROPORTION} <=> $SAMPLE_PAIR{$a}{IBD_PROPORTION}} keys(%SAMPLE_PAIR))
+{
+    my $sampleID1;
+    my $sampleID2;
+    if ($samplePairID =~ /^([^\/]*)\/([^\/]*)$/)
+    {
+        $sampleID1 = $1;
+        $sampleID2 = $2;
+    }
+    
+    if ($SAMPLE_PAIR{$samplePairID}{RELATIONSHIP} !~ /(MZ|PO|FS)/)
+    {
+        next;
+    }
+    
+    if ($dropRule eq 'case-biased')
+    {
+        #i)case-biased
+        #  a)FS/PO, case-ctrl : drop control
+        #  b)FS/PO, case-case : drop sample with lower call rate
+        #  c)FS/PO, ctrl-ctrl : drop sample with lower call rate
+        #  d)MZ, case-ctrl : drop both
+        #  e)MZ, case-case : drop sample with lower call rate
+        #  f)MZ, ctrl-ctrl : drop sample with lower call rate
+
+        print ANNOTATED_SAR "$samplePairID\t$SAMPLE_PAIR{$samplePairID}{RELATIONSHIP}\t$sampleID1\t$SAMPLE{$sampleID1}{AFFECTION}\t$SAMPLE{$sampleID1}{CALL_RATE}\t" .
+                                                                        "$sampleID2\t$SAMPLE{$sampleID2}{AFFECTION}\t$SAMPLE{$sampleID2}{CALL_RATE}\t";
+
+        if (exists($DROPPED_SAMPLES{$sampleID1}))
+        {
+            print ANNOTATED_SAR "$sampleID1-dropped-already\n";
+            next;
+        }
+        elsif (exists($DROPPED_SAMPLES{$sampleID2}))
+        {
+            print ANNOTATED_SAR "$sampleID2-dropped-already\n";
+            next;
+        }
+            
+        if ($SAMPLE{$sampleID1}{AFFECTION} eq 'n/a' ||
+            $SAMPLE{$sampleID1}{CALL_RATE} eq 'n/a' ||
+            $SAMPLE{$sampleID2}{AFFECTION} eq 'n/a' ||
+            $SAMPLE{$sampleID2}{CALL_RATE} eq 'n/a')
+        {
+            print STDERR "$sampleID1\t$SAMPLE{$sampleID1}{AFFECTION}\t$SAMPLE{$sampleID1}{CALL_RATE}\t$sampleID1\t$SAMPLE{$sampleID1}{AFFECTION}\t$SAMPLE{$sampleID1}{CALL_RATE}\n";
+            die "Required data is unknown, cannot apply drop rule:";
+        }
+
+                 
+        if ($SAMPLE{$sampleID1}{AFFECTION} ne $SAMPLE{$sampleID2}{AFFECTION})
+        {
+            if ($SAMPLE_PAIR{$samplePairID}{RELATIONSHIP} eq 'MZ')
+            {
+                $DROPPED_SAMPLES{$sampleID1}++;
+                $DROPPED_SAMPLES{$sampleID2}++;
+                print ANNOTATED_SAR "both\n";
+                print DROPPED_SAMPLES "$sampleID1\n";
+                print DROPPED_SAMPLES "$sampleID2\n";
+            }
+            else
+            {
+                if ($SAMPLE{$sampleID1}{AFFECTION} eq 'control')
+                {
+                    $DROPPED_SAMPLES{$sampleID1}++;
+                    print ANNOTATED_SAR "$sampleID1\n";
+                    print DROPPED_SAMPLES "$sampleID1\n";
+                }
+                else
+                {
+                    $DROPPED_SAMPLES{$sampleID2}++;
+                    print ANNOTATED_SAR "$sampleID2\n";
+                    print DROPPED_SAMPLES "$sampleID2\n";
+                }
+            }
+        }
+        else
+        {
+            if ($SAMPLE{$sampleID1}{CALL_RATE} < $SAMPLE{$sampleID2}{CALL_RATE})
+            {
+                $DROPPED_SAMPLES{$sampleID1}++;
+                print ANNOTATED_SAR "$sampleID1\n";
+                print DROPPED_SAMPLES "$sampleID1\n";
+            }
+            else
+            {
+                $DROPPED_SAMPLES{$sampleID2}++;
+                print ANNOTATED_SAR "$sampleID2\n";
+                print DROPPED_SAMPLES "$sampleID2\n";
+            }
+        }
+    }
+}
+close(ANNOTATED_SAR);
+close(DROPPED_SAMPLES);

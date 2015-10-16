@@ -1,0 +1,113 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+trim
+
+=head1 SYNOPSIS
+
+ trim [options] table-file
+  
+  -h         detailed help message
+  -v         verbose
+  -d         debug
+  table-file tab delimited file
+
+ example: trim pscalare.sa
+          cat pscalare.sa | trim
+ 
+ Trims the trailing spaces of each field in a table file.
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $verbose;
+my $debug;
+my $help;
+my $outFile;
+my $USE_STDIN;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('v'=>\$verbose,'d'=>\$debug, ,'h'=>\$help))
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+#read from STDIN
+if (scalar(@ARGV)==0)
+{
+    #allows the control to enter the file iteration for-loop
+    push (@ARGV, "stdout");
+    $USE_STDIN = 1;
+    #mute verbose and debug statements to prevent stdout/stdin corruption
+    $verbose = 0;
+    $debug = 0;
+}
+
+#iterates through each file
+foreach my $file (@ARGV) 
+{   
+    if($verbose) {print STDERR "===> Trimming $file <===\n"}
+    
+    if ($USE_STDIN)
+    {
+        *IN = *STDIN;
+        *OUT = *STDOUT;
+    }
+    else
+    {   
+        open (IN, $file) || die "Cannot open $file";
+        
+        my ($name, $dir, $ext) = fileparse($file, '\..*');
+        $outFile = "trimmed-$name$ext";
+        open (OUT, ">$outFile") || die "Cannot open $outFile";
+    }
+    
+    my $trimCount = 0;
+    
+    while (<IN>)
+    {
+        s/\r?\n?$//;
+        
+        my @fields = split('\t', $_, -1);
+        
+        for my $col (0 .. $#fields)
+        {       
+            my $sub = $fields[$col] =~ s/^\s+//;
+            $sub += $fields[$col] =~ s/\s+$//;
+                    
+            if ($sub) {$trimCount++}
+
+            if($col==$#fields)
+            {           
+                print OUT "$fields[$col]\n";
+            }
+            else
+            {
+                print OUT "$fields[$col]\t";
+            }
+        }
+    }
+    
+    if($verbose) {print STDERR "$trimCount trimmings\n"}
+    
+    close(OUT);
+    close(IN);
+}

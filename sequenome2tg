@@ -1,0 +1,263 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+sequenome2tg
+
+=head1 SYNOPSIS
+
+ sequenome2tg [options] <sequenome-file>	
+
+  -v              verbose
+  -d              debug
+  -o              output file
+                  by default, the output file name will be 
+                  the original file name with its extension 
+                  replaced by .tg
+  -m              marker file
+                  a)snp-id
+                  b)alleles
+  sequenome-file  sequenome output file
+                  a)ASSAY_ID
+                  b)GENOTYPE_ID
+                  c)SAMPLE_ID
+                  
+  example: sequenome2tg pscalare.txt -m pscalare.mk
+           sequenome2tg -o paltum.tg pscalare.txt -m pscalare.mk
+       
+  Converts a sequenome genotype file to tg-file.
+       
+=head1 DESCRIPTION
+
+=cut
+
+my $verbose;
+my $debug;
+my $help;
+my $sequenomeFile;
+my $tgFile;
+my $mkFile;
+my $colNo;
+my %SNP_SAMPLE;
+my %SNP;
+my %SAMPLE;
+my %NON_EXISTENT_SNP;
+my $fpos = 0;
+my $snpID = 0;
+my $sampleID = 0;
+my @sortedSNP;
+my @sortedSAMPLE;
+my %label2col;
+my $sampleNo;
+my $snpNo;
+my $headerProcessed;
+my $validRowNo = 0;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('v'=>\$verbose,'d'=>\$debug, 'h'=>\$help, 'o=s'=>\$tgFile, 'm=s'=>\$mkFile)
+	|| !defined($mkFile)
+	|| scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$sequenomeFile = $ARGV[0];
+
+if (!defined($tgFile))
+{
+    my ($name, $dir, $ext) = fileparse($sequenomeFile, '\..*');
+	$tgFile = "$name.tg";
+}
+
+open(MK, $mkFile) || die "Cannot open $mkFile\n";
+$headerProcessed = 0;
+while (<MK>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed) 
+	{
+       $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+                
+        SEARCH_LABEL: for my $label ('snp-id', 'alleles')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2col{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $mkFile";
+        }
+        
+        $headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		
+		my $snp = $fields[$label2col{'snp-id'}];
+		my $alleles = $fields[$label2col{'alleles'}];
+		
+		my @alleles = split("/", $alleles, -1);
+	
+		$SNP{$snp}{ALLELE_A} = $alleles[0];
+		$SNP{$snp}{ALLELE_B} = $alleles[1];
+	}
+}
+close(MK);
+
+open(SEQUENOME, $sequenomeFile) || die "Cannot open $sequenomeFile\n";
+$headerProcessed = 0;
+while (<SEQUENOME>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed) 
+	{
+       $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+                
+        SEARCH_LABEL: for my $label ('ASSAY_ID', 'GENOTYPE_ID', 'SAMPLE_ID')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2col{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $sequenomeFile";
+        }
+        $headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		
+		my $snp = $fields[$label2col{'ASSAY_ID'}];
+		my $sample = $fields[$label2col{'SAMPLE_ID'}];
+		
+		if (exists($SNP{$snp}))
+		{
+    		if(!exists($SNP{$snp}{ID}))
+    		{
+    			$SNP{$snp}{ID} = ++$snpID;
+    			push(@sortedSNP, $snp);		
+    		}
+    		
+    		if(!exists($SAMPLE{$sample}{ID}))
+    		{
+    			$SAMPLE{$sample}{ID} = ++$sampleID;
+    			push(@sortedSAMPLE, $sample);
+    		}
+    	
+    		my $key = "$SNP{$snp}{ID}-$SAMPLE{$sample}{ID}";
+    		$SNP_SAMPLE{$key} = $fpos;
+    		$validRowNo++;
+    	}
+    	else
+    	{
+    	    if(!exists($NON_EXISTENT_SNP{$snp}))
+    	    {
+    	        $NON_EXISTENT_SNP{$snp}++;
+    	        warn "$snp exists in genotype file but not in marker file";
+    	    }
+    	}
+	}
+	
+	$fpos += length($_) + 1;
+}
+
+open(OUT, ">$tgFile") || die "Cannot open $tgFile\n";
+
+@sortedSNP = sort(@sortedSNP);
+@sortedSAMPLE = sort(@sortedSAMPLE);
+
+$snpNo = scalar(@sortedSNP);
+$sampleNo = scalar(@sortedSAMPLE);
+
+#check number of rows
+if ($snpNo*$sampleNo!=$validRowNo)
+{
+	die "$sequenomeFile expected to have " . ($snpNo*$sampleNo+1) . " rows based on $sampleNo samples and $snpNo SNPs but instead has $validRowNo rows";
+}
+
+print OUT "snp-id\t" . join("\t", @sortedSAMPLE) . "\n";
+
+for my $snp (@sortedSNP)
+{
+	print OUT $snp;	
+	for my $sample (@sortedSAMPLE)
+	{
+		my $key = "$SNP{$snp}{ID}-$SAMPLE{$sample}{ID}";
+
+		seek(SEQUENOME, $SNP_SAMPLE{$key}, 0);
+		$_ = <SEQUENOME>;
+		s/\r?\n?$//;
+		
+		my @fields = split('\t', $_, $colNo);
+		my $genotype = $fields[$label2col{'GENOTYPE_ID'}];
+		
+		my $genotypeLength = length($genotype);
+		my $genotypeEncoding = -1;
+		
+		if ($genotypeLength==1)
+		{
+			if ($genotype eq $SNP{$snp}{ALLELE_A})
+			{
+				$genotypeEncoding = 0;
+			}
+			elsif ($genotype eq $SNP{$snp}{ALLELE_B})
+			{
+				$genotypeEncoding = 2;
+			}
+			else
+			{
+				die "Unrecognised allele for $snp: $genotype not in $SNP{$snp}{ALLELE_A}/$SNP{$snp}{ALLELE_B}";
+			}
+		}
+		elsif ($genotypeLength==2)
+		{
+			if ($genotype eq "$SNP{$snp}{ALLELE_A}$SNP{$snp}{ALLELE_B}")
+			{
+				$genotypeEncoding = 1;
+			}
+			else
+			{
+				die "Unrecognised allele for $snp: $genotype not in $SNP{$snp}{ALLELE_A}/$SNP{$snp}{ALLELE_B}";
+			}
+		}		
+		
+		print OUT "\t$genotypeEncoding"
+		
+	}	
+	print OUT "\n";
+}
+
+close(SEQUENOME);
+close(OUT);

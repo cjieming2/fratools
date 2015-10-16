@@ -1,0 +1,109 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+autobsub
+
+=head1 SYNOPSIS
+
+  autobsub [options] <main-command> <file>...  
+
+   -h       help
+   -o       bsub options
+   -t       test, just print out commands
+  --enum    enumerate place holder with numbers
+
+   example: autobsub "ftranspose %" *.gt
+            autobsub -o "-m compute-1-13" -c "ftranspose -v %" *.gt
+            autobsub "structure -K % -o % > %.log" --enum 2-5
+                
+  Submits multiple jobs to lsf via bsub.
+ 
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $bsubOptions = '';
+my $test;
+my $generateLogs;
+my $enumerate;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions('h'=>\$help, 'o=s'=>\$bsubOptions, 'enum=s'=>\$enumerate, 't'=>\$test, 'g'=>\$generateLogs) 
+  || (defined($enumerate) && $enumerate!~/(\d+)-(\d+)/ && $1>=$2)
+  || scalar(@ARGV)==0)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+#replaces special characters in the command
+my $mainCommand = shift(@ARGV);
+$mainCommand =~ s/\$/\\\$/g;
+
+if(defined$enumerate)
+{
+	if ($enumerate=~/(\d+)-(\d+)/)
+	{
+	    @ARGV = ($1 .. $2);
+	}
+}
+
+#iterates through each file
+foreach my $file (@ARGV) 
+{
+    #replaces escape characters in command line argument
+    $file =~ s/&/\\&/g;
+    $file =~ s/ /\\ /g;
+    my ($name, $path, $ext) = fileparse($file, '\..*');
+    my $fileName = "$name$ext";
+    
+    #extract main programme name
+    my @mainCommandTokens = split('\s', $mainCommand, 2);
+    my $mainProgramme = $mainCommandTokens[0];
+    $mainProgramme =~ s/.*\///;
+    
+    my $currentMainCommand = $mainCommand;
+    $currentMainCommand =~ s/%/$file/g;
+    
+    my $logs = $generateLogs ? " 2> $fileName.$mainProgramme.err > $fileName.$mainProgramme.log" : "";
+    my $command = "bsub $bsubOptions \"$currentMainCommand$logs\"";
+    
+    if(!$test)
+    {
+        system($command) == 0 || die "system $command failed: $?";
+         
+        if ($? == -1) 
+        {
+            warn "failed to execute: $!\n";
+        }
+        elsif ($? & 127) 
+        {
+            printf STDERR "child died with signal %d, %s coredump\n", ($? & 127),  ($? & 128) ? 'with' : 'without';
+        }
+        else 
+        {
+            printf STDERR "child exited with value %d\n", $? >> 8;
+        }
+    }
+    else
+    {
+        print STDERR "$command\n";
+    }
+}

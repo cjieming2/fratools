@@ -1,0 +1,993 @@
+#!/usr/bin/perl 
+
+use strict;
+use warnings;
+use DBI;
+use DBD::mysql;
+use fralib;
+use fratbi;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX qw(ceil floor);
+
+=head1 NAME
+
+fannotatesnps
+
+=head1 SYNOPSIS
+
+ fannotatesnps [options] <mk-file> 
+
+  -h       help
+  -forward force the flanks to be on forward strand
+  -b       build version (db125|db126)
+  -g       2bit file
+           use hg17 for db125 and hg18 for db126
+  -hapmap  get hapmap genotype counts
+  mk-file  marker file
+           a)rs-id          
+          
+ example: fannotatesnps pscalare.mk -b db125 -g homo-sapiens-35.1.2bit
+ 
+ Annotations are based on UCSC tables.
+  
+ Returns a marker file - gene-annotated-<mk-file>
+ a)rs-id            : rs name
+ b)chromosome       : chromosome where SNP is located
+ c)position         : position of SNP
+ d)strand           : strand of flank
+ e)alleles          : alleles
+ f)alleles-strand   : strand of alleles with respect to flanks
+ g)flanks           : flanks of SNP
+ h)class            : unknown, single, in-del, het, microsatellite, named,
+                      no var, mixed, mnp, insertion, deletion
+ i)function         : unknown, locus, coding, coding-synon, coding-nonsynon, 
+                      untranslated, intron, splice-site, cds-reference
+ j)chb-homo-count1  : CHB Homozygote 1 count
+ k)chb-hetero-count : CHB Heterozygote count
+ l)chb-homo-count2  : CHB Homozygote 2 count
+ m)jpt-homo-count1  : JPT Homozygote 1 count
+ n)jpt-hetero-count : JPT Heterozygote count
+ o)jpt-homo-count2  : JPT Homozygote 2 count
+ p)ceu-homo-count1  : CEU Homozygote 1 count
+ q)ceu-hetero-count : CEU Heterozygote count
+ r)ceu-homo-count2  : CEU Homozygote 2 count
+ s)yri-homo-count1  : YRI Homozygote 1 count
+ t)yri-hetero-count : YRI Heterozygote count
+ u)yri-homo-count2  : YRI Homozygote 2 count 
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $build = 'db128';
+my $mkFile;
+my $colNo;
+my $headerProcessed;
+my $twoBitFile;
+my %SNP;
+my %CHROM;
+my %META;
+my %label2Column;
+my $forceForwardStrand;
+my $getHapmapGenotypeCounts;
+$| = 1;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 
+                'b=s'=>\$build, 
+                'g=s'=>\$twoBitFile, 
+                'forward'=>\$forceForwardStrand,
+                'hapmap'=>\$getHapmapGenotypeCounts) 
+   || $build !~ /(db125|db126)/
+   || !defined($twoBitFile)
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$mkFile = $ARGV[0];
+
+print STDERR <<SUMMARY;
+=======
+Options
+=======
+Build: $build
+=======
+SUMMARY
+
+print STDERR "Initializing 2bit file $twoBitFile\n";
+if ($build eq 'db125' && $twoBitFile !~ /35\.1/ ||
+    $build eq 'db126' && $twoBitFile !~ /36\.1/)
+{
+    warn "Are you sure you are using the correct 2bit file?\n";
+}
+my $refSequence = fratbi->connect($twoBitFile);
+
+print STDERR "Reading $mkFile\n";
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+
+while(<MK>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		SEARCH_LABEL: for my $label('rs-id')
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $label)
+				{			
+					$label2Column{$label}=$col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			die "Cannot find '$label' in $mkFile";
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		my $rsID = $fields[$label2Column{'rs-id'}];
+
+        $SNP{$rsID} = 0;
+	}
+}
+close(MK);
+
+my $dbh = DBI->connect(getDBConnectionString(), getDBUser(), getDBUserPassword()) || die "Couldn't connect to database: " . DBI->errstr;
+my $sth;
+
+open(ANNOTATED_MK, ">annotated-$mkFile") || die "Cannot open annotated-$mkFile";
+open(PROBLEMATIC_MK, ">problematic-$mkFile") || die "Cannot open problematic-$mkFile";
+
+if ($build eq 'db125')
+{
+    print STDERR "uploading rs-id ... ";
+    $dbh->do(qq{
+        delete from snps;
+    }) || die;
+    
+    if (scalar(keys(%SNP)) < 1000)
+    {
+        $sth = $dbh->prepare(qq{
+        	  insert into snps (rsid) values (?);
+        }) || die;
+        
+        for my $rsid (keys(%SNP))
+        {
+        	$sth->execute($rsid) || die;
+        }
+        $sth->finish();
+    }
+    else
+    {
+        open(SNP_TABLE, ">/tmp/snps.txt") || die "Cannot open snps.txt in /tmp";
+        
+        for my $rsid (keys(%SNP))
+        {
+        	print SNP_TABLE "$rsid\n";
+        }
+        
+        close(SNP_TABLE);
+        
+        $dbh->do(qq{
+            load data local infile '/tmp/snps.txt' into table snps;
+        }) || die;
+        
+        !system("rm /tmp/snps.txt") || warn "cannot remove snps.txt in /tmp";
+    }
+    
+    if ($getHapmapGenotypeCounts)
+    {
+        print STDERR "basic info";
+        $dbh->do(qq{
+            drop table if exists snps_basic;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic
+    			select rsid, chrom, chromStart+1, strand, observed, class, func 
+    			from snps left join hg17_snp125 on rsid = name and chrom not like '%random';
+        }) || die;
+    
+        print STDERR " ... CHB ... ";
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic_chb
+    			select a.*, 
+    			       b.strand as chb_strand, 
+    			       b.observed as chb_observed, 
+    			       b.allele1 as chb_allele1,
+    			       b.homoCount1 as chb_homoCount1,
+    			       b.allele2 as chb_allele2,
+    			       b.homoCount2 as chb_homoCount2,
+    			       b.heteroCount as chb_heteroCount	         
+    			from snps_basic as a left join hg17_hapmapSnpsCHB as b on a.rsid = b.name;
+        }) || die;
+    
+        print STDERR "JPT ... ";
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic_chb_jpt
+    			select a.*, 
+    			       b.strand as jpt_strand, 
+    			       b.observed as jpt_observed, 
+    			       b.allele1 as jpt_allele1,
+    			       b.homoCount1 as jpt_homoCount1,
+    			       b.allele2 as jpt_allele2,
+    			       b.homoCount2 as jpt_homoCount2,
+    			       b.heteroCount as jpt_heteroCount	         
+    			from snps_basic_chb as a left join hg17_hapmapSnpsJPT as b on a.rsid = b.name;
+        }) || die;
+        
+        print STDERR "CEU ... ";
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt_ceu;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic_chb_jpt_ceu
+    			select a.*, 
+    			       b.strand as ceu_strand, 
+    			       b.observed as ceu_observed, 
+    			       b.allele1 as ceu_allele1,
+    			       b.homoCount1 as ceu_homoCount1,
+    			       b.allele2 as ceu_allele2,
+    			       b.homoCount2 as ceu_homoCount2,
+    			       b.heteroCount as ceu_heteroCount	         
+    			from snps_basic_chb_jpt as a left join hg17_hapmapSnpsCEU as b on a.rsid = b.name;
+        }) || die;
+        
+        print STDERR "YRI\n";
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt_ceu_yri;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic_chb_jpt_ceu_yri
+    			select a.*, 
+    			       b.strand as yri_strand, 
+    			       b.observed as yri_observed, 
+    			       b.allele1 as yri_allele1,
+    			       b.homoCount1 as yri_homoCount1,
+    			       b.allele2 as yri_allele2,
+    			       b.homoCount2 as yri_homoCount2,
+    			       b.heteroCount as yri_heteroCount	         
+    			from snps_basic_chb_jpt_ceu as a left join hg17_hapmapSnpsYRI as b on a.rsid = b.name;
+        }) || die;
+    
+    	my $queryHandle = $dbh->prepare(qq{
+            select * from snps_basic_chb_jpt_ceu_yri;
+        }) || die;
+        
+        $queryHandle->execute();    
+        my ($rsID, $chromosome, $position, $strand, $alleles, $class, $function, 
+        	$chbStrand, $chbObserved, $chbAllele1, $chbHomoCount1,  $chbAllele2, $chbHomoCount2, $chbHeteroCount,
+        	$jptStrand, $jptObserved, $jptAllele1, $jptHomoCount1,  $jptAllele2, $jptHomoCount2, $jptHeteroCount,
+        	$ceuStrand, $ceuObserved, $ceuAllele1, $ceuHomoCount1,  $ceuAllele2, $ceuHomoCount2, $ceuHeteroCount,
+        	$yriStrand, $yriObserved, $yriAllele1, $yriHomoCount1,  $yriAllele2, $yriHomoCount2, $yriHeteroCount);
+        
+        $queryHandle->bind_columns(\($rsID, $chromosome, $position, $strand, $alleles, $class, $function, 
+        	$chbStrand, $chbObserved, $chbAllele1, $chbHomoCount1,  $chbAllele2, $chbHomoCount2, $chbHeteroCount,
+        	$jptStrand, $jptObserved, $jptAllele1, $jptHomoCount1,  $jptAllele2, $jptHomoCount2, $jptHeteroCount,
+        	$ceuStrand, $ceuObserved, $ceuAllele1, $ceuHomoCount1,  $ceuAllele2, $ceuHomoCount2, $ceuHeteroCount,
+        	$yriStrand, $yriObserved, $yriAllele1, $yriHomoCount1,  $yriAllele2, $yriHomoCount2, $yriHeteroCount));
+        
+        print ANNOTATED_MK "rs-id\tchromosome\tposition\tstrand\talleles\talleles-strand\tflanks\tclass\tfunction\t";
+        print ANNOTATED_MK "chb-homo-count1\tchb-hetero-count\tchb-homo-count2\t";
+        print ANNOTATED_MK "jpt-homo-count1\tjpt-hetero-count\tjpt-homo-count2\t";
+        print ANNOTATED_MK "ceu-homo-count1\tceu-hetero-count\tceu-homo-count2\t";
+        print ANNOTATED_MK "yri-homo-count1\tyri-hetero-count\tyri-homo-count2\n";
+        print PROBLEMATIC_MK "rs-id\tissue\n";
+        
+        while (my @row = $queryHandle->fetchrow_array())
+        {
+            if(defined($chromosome))
+            {
+             	$chromosome =~ s/chr//;
+        	    
+        	    #counts number of times this paticular rs-id is annotated
+        	    $SNP{$rsID}++;
+                
+                if ($SNP{$rsID}==2)
+        	    {
+        	        print PROBLEMATIC_MK "$rsID\tmapped-to-multiple-locations\n";
+        	    }
+        	            	
+            	my $flanks = $refSequence->getSequence($chromosome, $position);
+                my $allelesStrand = 'ref';
+                
+                if ($class eq 'single' && $alleles=~/^[ACGT]\/[ACGT]$/)
+                {
+                    if (!$forceForwardStrand)
+                    {
+                        if ($strand eq '-')
+                        {
+                            $flanks = reverseComplementFlanks($flanks);
+                        }
+                    }
+                    else
+                    {
+                        if ($strand eq '-')
+                        {
+                            $strand = '+';
+                            $alleles = reverseComplementFlanks($alleles);
+                        }
+                    }
+                    
+                    #check for allele consistency
+                    $flanks =~ /(.*)\[.*([ACGT]).*\](.*)/;
+                    my $fivePrimeFlanks = $1;
+                    my $threePrimeFlanks = $3;
+                    my $allele = $2;
+                    
+                    $alleles =~ /([ACGT])\/([ACGT])/;                
+                    my %ALLELES;
+                    $ALLELES{$1} = 1;
+                    $ALLELES{$2} = 1;
+
+                    if(!exists($ALLELES{$allele}))
+                    {
+                        print PROBLEMATIC_MK "$rsID\tallele($allele)-in-extracted-flanks-not-observed-in-alleles-field($alleles)\n";
+                    }
+                }
+                else
+                {
+                    if ($strand eq '-')
+                    {
+                        $flanks = reverseComplementFlanks($flanks);
+                    }
+                    print PROBLEMATIC_MK "$rsID\tnon-bi-allelic\n";
+                }
+
+                $flanks =~ /(.*)\[.*([ACGT]).*\](.*)/;
+                my $fivePrimeFlanks = $1;
+                my $threePrimeFlanks = $3;
+                    
+            	print ANNOTATED_MK "$rsID\t$chromosome\t$position\t$strand\t$alleles\t$allelesStrand\t$fivePrimeFlanks" . "[" . $alleles . "]$threePrimeFlanks\t$class\t$function\t";
+
+            	if (defined($chbStrand) && $strand ne $chbStrand ||
+            	    defined($jptStrand) && $strand ne $jptStrand ||
+            	    defined($ceuStrand) && $strand ne $ceuStrand ||
+            	    defined($yriStrand) && $strand ne $yriStrand ||
+            	    defined($chbObserved) && $alleles ne $chbObserved ||
+            	    defined($jptObserved) && $alleles ne $jptObserved ||
+            	    defined($ceuObserved) && $alleles ne $ceuObserved ||
+            	    defined($yriObserved) && $alleles ne $yriObserved)
+            	{
+            		warn "There are inconsistent alleles for $rsID";
+            	}
+            	
+            	if(defined($chbObserved))
+            	{
+            		print ANNOTATED_MK "$chbHomoCount1\t$chbHeteroCount\t$chbHomoCount2\t";  	
+    			}
+    			else
+    			{
+    				print ANNOTATED_MK "n/a\tn/a\tn/a\t";  
+    			}
+    			
+            	if(defined($jptObserved))
+            	{
+            		print ANNOTATED_MK "$jptHomoCount1\t$jptHeteroCount\t$jptHomoCount2\t";  	
+    			}
+    			else
+    			{
+    				print ANNOTATED_MK "n/a\tn/a\tn/a\t";  
+    			}
+    			
+            	if(defined($ceuObserved))
+            	{
+            		print ANNOTATED_MK "$ceuHomoCount1\t$ceuHeteroCount\t$ceuHomoCount2\t";  	
+    			}
+    			else
+    			{
+    				print ANNOTATED_MK "n/a\tn/a\tn/a\t";  
+    			}
+    			
+            	if(defined($yriObserved))
+            	{
+            		print ANNOTATED_MK "$yriHomoCount1\t$yriHeteroCount\t$yriHomoCount2\n";  	
+    			}
+    			else
+    			{
+    				print ANNOTATED_MK "n/a\tn/a\tn/a\n";  
+        		}
+    		}
+    		else
+    		{
+   		        print ANNOTATED_MK "n/a" . "\tn/a" x 20 . "\n";
+      		    print PROBLEMATIC_MK "$rsID\tunmapped\n";
+    		}
+        }        
+    	
+    	$queryHandle->finish();
+    
+        $dbh->do(qq{
+            drop table if exists snps_basic;
+        });
+            
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb;
+        });
+        
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt;
+        });
+        
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt_ceu;
+        });
+        
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt_ceu_yri;
+        });
+    }
+    #don't get hapmap genotype counts
+    else
+    {
+        print STDERR "basic info\n";
+        $dbh->do(qq{
+            drop table if exists snps_basic;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic
+    			select rsid, chrom, chromStart+1, strand, observed, class, func 
+    			from snps left join hg17_snp125 on rsid = name and chrom not like '%random';
+        }) || die;
+        
+    	my $queryHandle = $dbh->prepare(qq{
+            select * from snps_basic;
+        }) || die;
+        
+        $queryHandle->execute();    
+        my ($rsID, $chromosome, $position, $strand, $alleles, $class, $function);
+        
+        $queryHandle->bind_columns(\($rsID, $chromosome, $position, $strand, $alleles, $class, $function));
+        
+        print ANNOTATED_MK "rs-id\tchromosome\tposition\tstrand\talleles\talleles-strand\tflanks\tclass\tfunction\n";
+        print PROBLEMATIC_MK "rs-id\tissue\n";
+        
+        while (my @row = $queryHandle->fetchrow_array())
+        {
+            if(defined($chromosome))
+            {
+             	$chromosome =~ s/chr//;
+        	    
+        	    #counts number of times this paticular rs-id is annotated
+        	    $SNP{$rsID}++;
+                
+                if ($SNP{$rsID}==2)
+        	    {
+        	        print PROBLEMATIC_MK "$rsID\tmapped-to-multiple-locations\n";
+        	    }
+        	    
+            	my $flanks = $refSequence->getSequence($chromosome, $position);
+                my $allelesStrand = 'ref';
+                
+                if ($class eq 'single' && $alleles=~/^[ACGT]\/[ACGT]$/)
+                {
+                    if (!$forceForwardStrand)
+                    {
+                        if ($strand eq '-')
+                        {
+                            $flanks = reverseComplementFlanks($flanks);
+                        }
+                    }
+                    else
+                    {
+                        if ($strand eq '-')
+                        {
+                            $strand = '+';
+                            $alleles = reverseComplementFlanks($alleles);
+                        }
+                    }
+                    
+                    #check for allele consistency
+                    $flanks =~ /(.*)\[.*([ACGT]).*\](.*)/;
+                    my $fivePrimeFlanks = $1;
+                    my $threePrimeFlanks = $3;
+                    my $allele = $2;
+                    
+                    $alleles =~ /([ACGT])\/([ACGT])/;                
+                    my %ALLELES;
+                    $ALLELES{$1} = 1;
+                    $ALLELES{$2} = 1;
+
+                    if(!exists($ALLELES{$allele}))
+                    {
+                        print PROBLEMATIC_MK "$rsID\tallele($allele)-in-extracted-flanks-not-observed-in-alleles-field($alleles)\n";
+                    }
+                }
+                else
+                {
+                    if ($strand eq '-')
+                    {
+                        $flanks = reverseComplementFlanks($flanks);
+                    }
+                    print PROBLEMATIC_MK "$rsID\tnon-bi-allelic\n";
+                }
+
+                $flanks =~ /(.*)\[.*([ACGT]).*\](.*)/;
+                my $fivePrimeFlanks = $1;
+                my $threePrimeFlanks = $3;
+
+            	print ANNOTATED_MK "$rsID\t$chromosome\t$position\t$strand\t$alleles\t$allelesStrand\t$fivePrimeFlanks" . "[" . $alleles . "]$threePrimeFlanks\t$class\t$function\n";    
+    		}
+    		else
+    		{
+   		        print ANNOTATED_MK "$rsID" . "\tn/a" x 8 . "\n";
+    		    print PROBLEMATIC_MK "$rsID\tunmapped\n";
+    		}
+        }
+    	
+    	$queryHandle->finish();
+    
+        $dbh->do(qq{
+            drop table if exists snps_basic;
+        });
+    }  
+}        
+elsif ($build eq 'db126')
+{   
+    print STDERR "uploading rs-id ... ";
+    $dbh->do(qq{
+        delete from snps;
+    }) || die;
+    
+    if (scalar(keys(%SNP)) < 1000)
+    {
+        $sth = $dbh->prepare(qq{
+        	  insert into snps (rsid) values (?);
+        }) || die;
+        
+        for my $rsid (keys(%SNP))
+        {
+        	$sth->execute($rsid) || die;
+        }
+        $sth->finish();
+    }
+    else
+    {
+        open(SNP_TABLE, ">/tmp/snps.txt") || die "Cannot open snps.txt in /tmp";
+        
+        for my $rsid (keys(%SNP))
+        {
+        	print SNP_TABLE "$rsid\n";
+        }
+        
+        close(SNP_TABLE);
+        
+        $dbh->do(qq{
+            load data local infile '/tmp/snps.txt' into table snps;
+        }) || die;
+        
+        !system("rm /tmp/snps.txt") || warn "cannot remove snps.txt in /tmp";
+    }
+    
+    if ($getHapmapGenotypeCounts)
+    {
+        print STDERR "basic info";
+        $dbh->do(qq{
+            drop table if exists snps_basic;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic
+    			select rsid, chrom, chromStart+1, strand, observed, class, func 
+    			from snps left join hg18_snp126 on rsid = name and chrom not like '%random';
+        }) || die;
+    
+        print STDERR " ... CHB ... ";
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic_chb
+    			select a.*, 
+    			       b.strand as chb_strand, 
+    			       b.observed as chb_observed, 
+    			       b.allele1 as chb_allele1,
+    			       b.homoCount1 as chb_homoCount1,
+    			       b.allele2 as chb_allele2,
+    			       b.homoCount2 as chb_homoCount2,
+    			       b.heteroCount as chb_heteroCount	         
+    			from snps_basic as a left join hg18_hapmapSnpsCHB as b on a.rsid = b.name;
+        }) || die;
+    
+        print STDERR "JPT ... ";
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic_chb_jpt
+    			select a.*, 
+    			       b.strand as jpt_strand, 
+    			       b.observed as jpt_observed, 
+    			       b.allele1 as jpt_allele1,
+    			       b.homoCount1 as jpt_homoCount1,
+    			       b.allele2 as jpt_allele2,
+    			       b.homoCount2 as jpt_homoCount2,
+    			       b.heteroCount as jpt_heteroCount	         
+    			from snps_basic_chb as a left join hg18_hapmapSnpsJPT as b on a.rsid = b.name;
+        }) || die;
+        
+        print STDERR "CEU ... ";
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt_ceu;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic_chb_jpt_ceu
+    			select a.*, 
+    			       b.strand as ceu_strand, 
+    			       b.observed as ceu_observed, 
+    			       b.allele1 as ceu_allele1,
+    			       b.homoCount1 as ceu_homoCount1,
+    			       b.allele2 as ceu_allele2,
+    			       b.homoCount2 as ceu_homoCount2,
+    			       b.heteroCount as ceu_heteroCount	         
+    			from snps_basic_chb_jpt as a left join hg18_hapmapSnpsCEU as b on a.rsid = b.name;
+        }) || die;
+        
+        print STDERR "YRI\n";
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt_ceu_yri;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic_chb_jpt_ceu_yri
+    			select a.*, 
+    			       b.strand as yri_strand, 
+    			       b.observed as yri_observed, 
+    			       b.allele1 as yri_allele1,
+    			       b.homoCount1 as yri_homoCount1,
+    			       b.allele2 as yri_allele2,
+    			       b.homoCount2 as yri_homoCount2,
+    			       b.heteroCount as yri_heteroCount	         
+    			from snps_basic_chb_jpt_ceu as a left join hg18_hapmapSnpsYRI as b on a.rsid = b.name;
+        }) || die;
+    
+    	my $queryHandle = $dbh->prepare(qq{
+            select * from snps_basic_chb_jpt_ceu_yri;
+        }) || die;
+        
+        $queryHandle->execute();    
+        my ($rsID, $chromosome, $position, $strand, $alleles, $class, $function, 
+        	$chbStrand, $chbObserved, $chbAllele1, $chbHomoCount1,  $chbAllele2, $chbHomoCount2, $chbHeteroCount,
+        	$jptStrand, $jptObserved, $jptAllele1, $jptHomoCount1,  $jptAllele2, $jptHomoCount2, $jptHeteroCount,
+        	$ceuStrand, $ceuObserved, $ceuAllele1, $ceuHomoCount1,  $ceuAllele2, $ceuHomoCount2, $ceuHeteroCount,
+        	$yriStrand, $yriObserved, $yriAllele1, $yriHomoCount1,  $yriAllele2, $yriHomoCount2, $yriHeteroCount);
+        
+        $queryHandle->bind_columns(\($rsID, $chromosome, $position, $strand, $alleles, $class, $function, 
+        	$chbStrand, $chbObserved, $chbAllele1, $chbHomoCount1,  $chbAllele2, $chbHomoCount2, $chbHeteroCount,
+        	$jptStrand, $jptObserved, $jptAllele1, $jptHomoCount1,  $jptAllele2, $jptHomoCount2, $jptHeteroCount,
+        	$ceuStrand, $ceuObserved, $ceuAllele1, $ceuHomoCount1,  $ceuAllele2, $ceuHomoCount2, $ceuHeteroCount,
+        	$yriStrand, $yriObserved, $yriAllele1, $yriHomoCount1,  $yriAllele2, $yriHomoCount2, $yriHeteroCount));
+        
+        print ANNOTATED_MK "rs-id\tchromosome\tposition\tstrand\talleles\talleles-strand\tflanks\tclass\tfunction\t";
+        print ANNOTATED_MK "chb-homo-count1\tchb-hetero-count\tchb-homo-count2\t";
+        print ANNOTATED_MK "jpt-homo-count1\tjpt-hetero-count\tjpt-homo-count2\t";
+        print ANNOTATED_MK "ceu-homo-count1\tceu-hetero-count\tceu-homo-count2\t";
+        print ANNOTATED_MK "yri-homo-count1\tyri-hetero-count\tyri-homo-count2\n";
+        print PROBLEMATIC_MK "rs-id\tissue\n";
+        
+        while (my @row = $queryHandle->fetchrow_array())
+        {
+            if(defined($chromosome))
+            {
+             	$chromosome =~ s/chr//;
+        	    
+        	    #counts number of times this paticular rs-id is annotated
+        	    $SNP{$rsID}++;
+                
+                if ($SNP{$rsID}==2)
+        	    {
+        	        print PROBLEMATIC_MK "$rsID\tmapped-to-multiple-locations\n";
+        	    }
+        	            	
+            	my $flanks = $refSequence->getSequence($chromosome, $position);
+                my $allelesStrand = 'ref';
+                
+                if ($class eq 'single' && $alleles=~/^[ACGT]\/[ACGT]$/)
+                {
+                    if (!$forceForwardStrand)
+                    {
+                        if ($strand eq '-')
+                        {
+                            $flanks = reverseComplementFlanks($flanks);
+                        }
+                    }
+                    else
+                    {
+                        if ($strand eq '-')
+                        {
+                            $strand = '+';
+                            $alleles = reverseComplementFlanks($alleles);
+                        }
+                    }
+                    
+                    #check for allele consistency
+                    $flanks =~ /(.*)\[.*([ACGT]).*\](.*)/;
+                    my $fivePrimeFlanks = $1;
+                    my $threePrimeFlanks = $3;
+                    my $allele = $2;
+                    
+                    $alleles =~ /([ACGT])\/([ACGT])/;                
+                    my %ALLELES;
+                    $ALLELES{$1} = 1;
+                    $ALLELES{$2} = 1;
+
+                    if(!exists($ALLELES{$allele}))
+                    {
+                        print PROBLEMATIC_MK "$rsID\tallele($allele)-in-extracted-flanks-not-observed-in-alleles-field($alleles)\n";
+                    }
+                }
+                else
+                {
+                    if ($strand eq '-')
+                    {
+                        $flanks = reverseComplementFlanks($flanks);
+                    }
+                    print PROBLEMATIC_MK "$rsID\tnon-bi-allelic\n";
+                }
+
+                $flanks =~ /(.*)\[.*([ACGT]).*\](.*)/;
+                my $fivePrimeFlanks = $1;
+                my $threePrimeFlanks = $3;
+                    
+            	print ANNOTATED_MK "$rsID\t$chromosome\t$position\t$strand\t$alleles\t$allelesStrand\t$fivePrimeFlanks" . "[" . $alleles . "]$threePrimeFlanks\t$class\t$function\t";
+
+            	if (defined($chbStrand) && $strand ne $chbStrand ||
+            	    defined($jptStrand) && $strand ne $jptStrand ||
+            	    defined($ceuStrand) && $strand ne $ceuStrand ||
+            	    defined($yriStrand) && $strand ne $yriStrand ||
+            	    defined($chbObserved) && $alleles ne $chbObserved ||
+            	    defined($jptObserved) && $alleles ne $jptObserved ||
+            	    defined($ceuObserved) && $alleles ne $ceuObserved ||
+            	    defined($yriObserved) && $alleles ne $yriObserved)
+            	{
+            		warn "There are inconsistent alleles for $rsID";
+            	}
+            	
+            	if(defined($chbObserved))
+            	{
+            		print ANNOTATED_MK "$chbHomoCount1\t$chbHeteroCount\t$chbHomoCount2\t";  	
+    			}
+    			else
+    			{
+    				print ANNOTATED_MK "n/a\tn/a\tn/a\t";  
+    			}
+    			
+            	if(defined($jptObserved))
+            	{
+            		print ANNOTATED_MK "$jptHomoCount1\t$jptHeteroCount\t$jptHomoCount2\t";  	
+    			}
+    			else
+    			{
+    				print ANNOTATED_MK "n/a\tn/a\tn/a\t";  
+    			}
+    			
+            	if(defined($ceuObserved))
+            	{
+            		print ANNOTATED_MK "$ceuHomoCount1\t$ceuHeteroCount\t$ceuHomoCount2\t";  	
+    			}
+    			else
+    			{
+    				print ANNOTATED_MK "n/a\tn/a\tn/a\t";  
+    			}
+    			
+            	if(defined($yriObserved))
+            	{
+            		print ANNOTATED_MK "$yriHomoCount1\t$yriHeteroCount\t$yriHomoCount2\n";  	
+    			}
+    			else
+    			{
+    				print ANNOTATED_MK "n/a\tn/a\tn/a\n";  
+        		}
+    		}
+    		else
+    		{
+   		        print ANNOTATED_MK "n/a" . "\tn/a" x 20 . "\n";
+      		    print PROBLEMATIC_MK "$rsID\tunmapped\n";
+    		}
+        }        
+    	
+    	$queryHandle->finish();
+    
+        $dbh->do(qq{
+            drop table if exists snps_basic;
+        });
+            
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb;
+        });
+        
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt;
+        });
+        
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt_ceu;
+        });
+        
+        $dbh->do(qq{
+            drop table if exists snps_basic_chb_jpt_ceu_yri;
+        });
+    }
+    #don't get hapmap genotype counts
+    else
+    {
+        print STDERR "basic info\n";
+        $dbh->do(qq{
+            drop table if exists snps_basic;
+        }) || die;  
+        $dbh->do(qq{
+        	create table snps_basic
+    			select rsid, chrom, chromStart+1, strand, observed, class, func 
+    			from snps left join hg18_snp126 on rsid = name and chrom not like '%random';
+        }) || die;
+        
+    	my $queryHandle = $dbh->prepare(qq{
+            select * from snps_basic;
+        }) || die;
+        
+        $queryHandle->execute();    
+        my ($rsID, $chromosome, $position, $strand, $alleles, $class, $function);
+        
+        $queryHandle->bind_columns(\($rsID, $chromosome, $position, $strand, $alleles, $class, $function));
+        
+        print ANNOTATED_MK "rs-id\tchromosome\tposition\tstrand\talleles\talleles-strand\tflanks\tclass\tfunction\n";
+        print PROBLEMATIC_MK "rs-id\tissue\n";
+        
+        while (my @row = $queryHandle->fetchrow_array())
+        {
+            if(defined($chromosome))
+            {
+             	$chromosome =~ s/chr//;
+        	    
+        	    #counts number of times this paticular rs-id is annotated
+        	    $SNP{$rsID}++;
+                
+                if ($SNP{$rsID}==2)
+        	    {
+        	        print PROBLEMATIC_MK "$rsID\tmapped-to-multiple-locations\n";
+        	    }
+        	    
+            	my $flanks = $refSequence->getSequence($chromosome, $position);
+                my $allelesStrand = 'ref';
+                
+                if ($class eq 'single' && $alleles=~/^[ACGT]\/[ACGT]$/)
+                {
+                    if (!$forceForwardStrand)
+                    {
+                        if ($strand eq '-')
+                        {
+                            $flanks = reverseComplementFlanks($flanks);
+                        }
+                    }
+                    else
+                    {
+                        if ($strand eq '-')
+                        {
+                            $strand = '+';
+                            $alleles = reverseComplementFlanks($alleles);
+                        }
+                    }
+                    
+                    #check for allele consistency
+                    $flanks =~ /(.*)\[.*([ACGT]).*\](.*)/;
+                    my $fivePrimeFlanks = $1;
+                    my $threePrimeFlanks = $3;
+                    my $allele = $2;
+                    
+                    $alleles =~ /([ACGT])\/([ACGT])/;                
+                    my %ALLELES;
+                    $ALLELES{$1} = 1;
+                    $ALLELES{$2} = 1;
+
+                    if(!exists($ALLELES{$allele}))
+                    {
+                        print PROBLEMATIC_MK "$rsID\tallele($allele)-in-extracted-flanks-not-observed-in-alleles-field($alleles)\n";
+                    }
+                }
+                else
+                {
+                    if ($strand eq '-')
+                    {
+                        $flanks = reverseComplementFlanks($flanks);
+                    }
+                    print PROBLEMATIC_MK "$rsID\tnon-bi-allelic\n";
+                }
+
+                $flanks =~ /(.*)\[.*([ACGT]).*\](.*)/;
+                my $fivePrimeFlanks = $1;
+                my $threePrimeFlanks = $3;
+
+            	print ANNOTATED_MK "$rsID\t$chromosome\t$position\t$strand\t$alleles\t$allelesStrand\t$fivePrimeFlanks" . "[" . $alleles . "]$threePrimeFlanks\t$class\t$function\n";    
+    		}
+    		else
+    		{
+   		        print ANNOTATED_MK "$rsID" . "\tn/a" x 8 . "\n";
+    		    print PROBLEMATIC_MK "$rsID\tunmapped\n";
+    		}
+        }
+    	
+    	$queryHandle->finish();
+    
+        $dbh->do(qq{
+            drop table if exists snps_basic;
+        });
+    }  
+}
+
+close(ANNOTATED_MK);
+close(PROBLEMATIC_MK);
+$dbh->disconnect();
+
+#returns the reverse complement of a flank
+#i.e. ACGATCAGCTAAGCTCAG[A/G]ACGTGVTGATGCGT
+sub reverseComplementFlanks
+{
+	my $flanks = shift;
+	
+	my @newFlanks = ();
+	
+	for my $base (split(//, $flanks))
+	{
+		unshift(@newFlanks, flankComplement($base));
+	}
+	
+	return join("", @newFlanks);
+}
+
+#an auxiliary function that adds complements to extra symbols found in a flanking sequence
+sub flankComplement
+{
+	my $base = shift;
+	
+    if ($base eq '[')
+	{
+		return ']';
+	}
+	elsif ($base eq ']')
+	{
+		return '[';
+	}	
+	elsif ($base eq '/')
+	{
+		return $base;
+	}
+	elsif ($base eq '-')
+	{
+		return $base;
+	}
+	elsif ($base eq ' ')
+	{
+		return $base;
+	}
+	else
+	{
+		return complementBase($base);
+	}
+}

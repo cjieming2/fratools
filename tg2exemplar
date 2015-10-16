@@ -1,0 +1,207 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Pod::Usage;
+use File::Basename;
+use Switch;
+
+=head1 NAME
+
+tg2exemplar
+
+=head1 SYNOPSIS
+
+ tg2exemplar [options] tg-file
+    
+  -m        marker annotation file
+            a)snp-id
+            b)alleles
+  tg-file   tg file
+  
+ example: tg2exemplar -m pscalare.mk pscalare.tg
+    
+ Converts tg file to AB format for Exemplar import.
+       
+=head1 DESCRIPTION
+ 
+=cut
+
+#option variables
+my $help;
+my $mkFile;
+my $tgFile;
+my $outFile;
+my %SNP;
+my $colNo;
+my %label2Column;
+my $headerProcessed;
+my %SAMPLE;
+my $saFile;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'm=s'=>\$mkFile, 's=s'=>\$saFile)
+   || !defined($mkFile)
+   || !defined($saFile)
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$tgFile = $ARGV[0];
+
+#checks if input is genotype file
+isTg($tgFile) || die "$tgFile is not a tg file";
+    
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('snp-id', 'alleles')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $mkFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        
+        my $snp = $fields[$label2Column{'snp-id'}];
+        my $alleles = $fields[$label2Column{'alleles'}];
+        
+        my @alleles = split('/', $alleles, -1);
+
+        $SNP{$snp}{-1} = "";
+        $SNP{$snp}{0} = "$alleles[0]$alleles[0]";
+        $SNP{$snp}{1} = "$alleles[0]$alleles[1]";
+        $SNP{$snp}{2} = "$alleles[1]$alleles[1]";
+    }
+}
+close(MK);
+
+open(SA, $saFile) || die "Cannot open $saFile";
+$headerProcessed = 0;
+while(<SA>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('sample-id', 'affection')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $saFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        
+        my $sampleID = $fields[$label2Column{'sample-id'}];
+	my $affection = $fields[$label2Column{'affection'}];
+		
+	if ($affection eq 'case')
+	{
+        	$SAMPLE{$sampleID}{AFFECTION} = 1;
+	}
+	elsif ($affection eq 'control')
+	{        
+		$SAMPLE{$sampleID}{AFFECTION} = 2;
+        }
+	else 
+	{
+		$SAMPLE{$sampleID}{AFFECTION} = 0;
+    	}
+    }
+}
+close(SA);
+
+open(TG, "$tgFile") || die "Cannot open $tgFile\n";
+$headerProcessed = 0;
+if(!defined($outFile))  
+{
+  my ($name, $path, $ext) = fileparse($tgFile, '\..*');
+  $outFile = "exemplar-$name.csv";
+}
+open(EXEMPLAR, ">$outFile") || die "Cannot open $outFile\n";
+
+while (<TG>)
+{
+    s/\r?\n?$//;
+   
+    if(!$headerProcessed)
+    {
+        #counts number of columns
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        $_=~s/\t/,/g;
+        
+        print EXEMPLAR "$_\n";
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+    
+    	my $snpID = $fields[0];
+    
+        print EXEMPLAR "$snpID";
+               
+        for my $col (1..$#fields)
+        {
+            print EXEMPLAR ",$SNP{$snpID}{$fields[$col]}";
+        }
+        
+        print EXEMPLAR "\n";
+    }
+}
+
+close(EXEMPLAR);
+close(TG);

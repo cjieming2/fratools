@@ -1,0 +1,172 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+helixtree2gt
+
+=head1 SYNOPSIS
+
+ helixtree2gt [options] <filename>
+  -h  help
+  -m  mk-file
+    
+ example: helixtree2tg -m pscalare.mk pscalare.txt
+ 
+ Converts an Helixtree file with [ACGT?]_[ACGT?] encoding to a gt-file.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $mkFile;
+my $gtFile;
+my $helixtreeFile;
+my $headerProcessed;
+my @col2snp;
+my %SNP;
+my $colNo;
+my %anno2col;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'm=s'=>\$mkFile)
+   || !defined($mkFile))
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$helixtreeFile = $ARGV[0];
+
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+
+while(<MK>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		SEARCH_LABEL: for my $label ('snp-id', 'alleles')
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $label)
+				{			
+					$anno2col{$label} = $col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			die "Cannot find '$label' in $mkFile";
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		my $snp = $fields[$anno2col{'snp-id'}];
+		my $allele = $fields[$anno2col{'alleles'}];
+		
+		my @alleles;
+
+		if($allele=~/([ACGT])\/([ACGT])/)
+		{
+			@alleles = ($1, $2);
+		}
+		
+		$SNP{$snp}{"$alleles[0]_$alleles[0]"} = 0;
+		$SNP{$snp}{"$alleles[0]_$alleles[1]"} = 1;
+		$SNP{$snp}{"$alleles[1]_$alleles[1]"} = 2;
+	}
+}
+close(MK);
+
+open(HELIXTREE, "$helixtreeFile") || die "Cannot open $helixtreeFile\n";
+$headerProcessed = 0;
+
+if(!defined($gtFile))
+{
+	my ($name, $path, $ext) = fileparse($helixtreeFile, '\..*');
+	$gtFile = "$name.gt";
+}
+
+open(GT, ">$gtFile") || die "Cannot open $gtFile\n";
+
+while (<HELIXTREE>)
+{
+    s/\r?\n?$//;
+   
+    if(!$headerProcessed)
+    {
+    	$colNo = s/\t/\t/g + 1;
+    	
+    	my @fields = split('\t', $_, $colNo);
+    	
+    	print GT "sample-id";
+    	for my $col (1 .. $#fields)
+    	{
+			print GT "\t$fields[$col]";
+           	$col2snp[$col] = $fields[$col];
+    	} 
+ 		print GT "\n";
+ 		
+        $headerProcessed = 1;
+    }
+    else
+    {
+    	my @fields = split('\t', $_, $colNo);
+    
+        print GT "$fields[0]";
+
+		my $sample = $fields[0];
+
+		for my $col (1..$#fields)
+		{
+			my $genotype = $fields[$col];
+			my $snp = $col2snp[$col];
+			
+			if ($genotype ne '?_?')
+			{
+				if (exists($SNP{$snp}{$genotype}))
+				{
+					print GT "\t$SNP{$snp}{$genotype}";
+				}
+				else
+				{
+					die "Unrecognised $snp genotype for sample $sample: $genotype " . join('/',keys(%{$SNP{$snp}}));
+				}
+			}
+			else
+			{
+				print GT "\t-1";
+			}
+		}
+
+        print GT "\n";
+    }
+}
+
+close(GT);
+close(HELIXTREE);

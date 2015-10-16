@@ -1,0 +1,203 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Pod::Usage;
+use File::Basename;
+use Switch;
+
+=head1 NAME
+
+fpicksnps
+
+=head1 SYNOPSIS
+
+ fpicksnps [options] gene-list-file
+    
+  -w              window (default 10000)
+  -m              mk file
+                  a)snp-id
+                  b)rs-id
+                  c)chromosome
+                  d)position
+  gene-list-file  gene list
+                  a)gene-id
+                  b)chromosome
+                  c)start
+                  d)end
+
+ example: fpicksnps pscalare.mk -w 10000
+    
+ Extracts SNPs from a marker file based on a list of genes.
+       
+=head1 DESCRIPTION
+ 
+=cut
+
+#option variables
+my $help;
+my $mkFile;
+my $geneListFile;
+my $geneWindowSize = 10000;
+my $selectedSNPMkFile;
+my %SNP;
+my %CHROM;
+my $colNo;
+my %label2Column;
+my $headerProcessed;
+my $snpsExtractedNo = 0;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 
+                'm=s'=>\$mkFile, 
+                'w=i'=>\$geneWindowSize)
+   || !defined($mkFile)
+   || $geneWindowSize < 1
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$geneListFile = $ARGV[0];
+
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('snp-id', 'rs-id', 'chromosome', 'position', 'dbsnp')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $mkFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        
+        my $snp = $fields[$label2Column{'snp-id'}];
+        my $rsid = $fields[$label2Column{'rs-id'}];
+        my $chromosome = $fields[$label2Column{'chromosome'}];
+        my $position = $fields[$label2Column{'position'}];
+		my $dbsnp = $fields[$label2Column{'dbsnp'}];
+		
+		$SNP{$snp}{RSID} = $rsid;
+		$SNP{$snp}{CHROM} = $chromosome;
+		$SNP{$snp}{POS} = $position;
+		$SNP{$snp}{DBSNP} = $dbsnp;
+		
+		if (!defined($CHROM{$chromosome}))
+		{
+            $CHROM{$chromosome} = ();
+		}
+		
+		push(@{$CHROM{$chromosome}}, $snp);
+    }
+}
+close(MK);
+
+open(GENE_LIST, $geneListFile) || die "Cannot open $geneListFile";
+$headerProcessed = 0;
+
+if(!defined($selectedSNPMkFile))
+{
+	my ($name, $dir, $ext) = fileparse($geneListFile, '\..*');
+	$selectedSNPMkFile = "selected-snps-$name$ext";
+}
+open(SELECTED_SNPS_MK, ">$selectedSNPMkFile") || die "Cannot open $selectedSNPMkFile";
+ 
+while(<GENE_LIST>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('gene-id', 'chromosome', 'start', 'end')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $mkFile";
+        }
+        
+        print SELECTED_SNPS_MK "$_\tsnp-id\trs-id\tchromosome\tposition\tdbsnp\n";
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        
+        my $geneID = $fields[$label2Column{'gene-id'}];
+        my $chromosome = $fields[$label2Column{'chromosome'}];
+        my $start = $fields[$label2Column{'start'}];
+		my $end = $fields[$label2Column{'end'}];
+		my $foundSNP = 0;
+		
+		if ($start ne 'n/a' && $end ne 'n/a')
+		{
+    		for my $snpID (@{$CHROM{$chromosome}})
+    		{			
+    		    if ($chromosome eq $SNP{$snpID}{CHROM})
+    		    {
+    		        my $snpPosition = $SNP{$snpID}{POS};
+    		        
+        			if ($snpPosition >= $start-$geneWindowSize && $snpPosition <= $end+$geneWindowSize)
+        			{
+        				print SELECTED_SNPS_MK "$_\t$snpID\t$SNP{$snpID}{RSID}\t$chromosome\t$SNP{$snpID}{POS}\t$SNP{$snpID}{DBSNP}\n";
+        				++$snpsExtractedNo;
+        				$foundSNP = 1;
+        			}
+    		    }
+    		}
+		}
+		
+		if (!$foundSNP)
+		{
+		    print SELECTED_SNPS_MK "$_\tn/a\tn/a\tn/a\tn/a\tn/a\n";
+    	}			
+    }
+}
+close(GENE_LIST);
+close(SELECTED_SNPS_MK);
+
+print "No. of SNPs extracted: $snpsExtractedNo\n"

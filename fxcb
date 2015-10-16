@@ -1,0 +1,299 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Cwd;
+use File::Basename;
+use Pod::Usage;
+use DBI;
+use POSIX;
+
+=head1 NAME
+
+fxcb
+
+=head1 SYNOPSIS
+
+fxcb [options] <mk-file>
+  
+ -h        help
+ -c        maximum inter marker distance for contiguous blocks 
+           (default 2000)
+ -m        minimum block size (default 4)
+ mk-file   marker file 
+           a)snp-id
+           b)chromosome
+           c)position
+  
+ example: fxcb pscalare.mk -m 5 -c 3000
+ 
+ Extract SNPs that form contiguous blocks in which there are a 
+ minimum of m SNPs that are no more than c distance apart.
+
+=head1 DESCRIPTION
+
+ Generates 4 files
+ a)xxxsnps-contig-block-c<c>-m<m>-<mk-file>
+   SNPs that form the contiguous blocks.
+   
+   snp-id  chromosome      position
+   SNP_A-1654882   1       18033624
+   SNP_A-1655176   1       18034558
+   SNP_A-1655302   1       18034787
+   SNP_A-1656716   1       18035647
+
+ b)block-frequency-c<c>-m<m>-<mk-file>
+   Frequency of SNP blocks.
+	
+   block-size      frequency
+   2       7846
+   3       2401
+   4       800
+   5       289
+   6       120
+   7       46
+
+ c)summary-block-c<c>-m<m>-<mk-file>
+   Location of each block.   
+
+   block-no        block-size      chromosome      left-interval   right-interval average-interval
+   1       2       1       3326028 3327493 1466.00
+   2       2       1       3744122 3744475 354.00
+   3       2       1       4388284 4388412 129.00
+   4       2       1       4496979 4497550 572.00
+   5       3       1       5163918 5164291 187.50
+
+ d)summary-interval-c<c>-m<m>-<mk-file>
+   Chromosome categorization of SNPs intervals.
+
+   chromosome      no-of-intervals average-interval        min-interval    max-interval
+   1       4541    53420.90        17      21558609
+   2       5067    47828.32        17      6479847
+   3       3954    50241.51        17      5255444
+   4       4345    43954.70        17      4300432
+   5       4211    42840.00        17      3925515
+   6       3958    43133.67        17      3166935
+   7       3435    46106.12        17      4110865
+
+=cut
+
+#option variables
+my $help;
+my $colNo;
+my $headerProcessed;
+my %label2Column;
+my $mkFile;
+my $summaryIntervalFile;
+my $summaryBlockFile;
+my $contigBlockFile;
+my $cutoff = 2000;
+my $minimumBlockSize = 4;
+my %SNP;
+my %CHROM;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'c=i'=>\$cutoff, 'm=i'=>\$minimumBlockSize) 
+   || $cutoff < 0 
+   || $minimumBlockSize < 0 
+   || scalar(@ARGV) != 1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$mkFile = $ARGV[0];
+
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+         
+        SEARCH_LABEL: for my $label ('snp-id', 'chromosome', 'position')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+
+           	die "Cannot find '$label' in $mkFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $snpID = $fields[$label2Column{'snp-id'}];
+        my $chromosome = $fields[$label2Column{'chromosome'}];
+        my $position = $fields[$label2Column{'position'}];
+        
+        if ($chromosome ne 'n/a' && $position ne 'n/a')
+        {
+            if (exists($CHROM{$chromosome}{$position}))
+            {        
+                warn "$snpID has same location(chr$chromosome:$position) as $CHROM{$chromosome}{$position}, dropped";
+            }
+            else
+            {
+                $CHROM{$chromosome}{$position} = $snpID;
+                $SNP{$snpID}{CHROM} = $chromosome;
+                $SNP{$snpID}{POSITION} = $position;
+            }
+        }
+        else
+        {
+            warn "SNP without location, $snpID dropped";
+        }
+    }
+}
+close(MK);
+
+my @clusters = ();
+my $clusterNo = 0;
+
+my ($name, $dir, $ext) = fileparse($mkFile, '\..*');
+$summaryIntervalFile = "summary-interval-c$cutoff-m$minimumBlockSize-$name.txt";
+$summaryBlockFile = "summary-block-c$cutoff-m$minimumBlockSize-$name.txt";
+
+open(INTERVAL, ">$summaryIntervalFile") || die "Cannot open $summaryIntervalFile";
+open(BLOCK, ">$summaryBlockFile") || die "Cannot open $summaryBlockFile";
+
+print INTERVAL "chromosome\tno-of-intervals\taverage-interval\tmin-interval\tmax-interval\n";
+for my $chromosome (sort {if ("$a$b"=~/\D/) {$a cmp $b} else {$a <=> $b}} keys(%CHROM))
+{
+    my $lastPosition;
+    my @interMarkerDistance = ();
+    my $intervalDistanceTotal = 0;
+    my $intervalNo = 0;
+    my $intervalDistance;
+    my $meanInterval;
+    my $minInterval = INT_MAX;
+    my $maxInterval = -1;
+    
+    my @currentCluster = ();
+    
+    for my $position (sort {$a <=> $b} keys(%{$CHROM{$chromosome}}))
+    {       
+        if(!defined($lastPosition))
+        {
+            $lastPosition = $position;
+            @currentCluster = ();
+            $currentCluster[0] = $CHROM{$chromosome}{$position};
+        }
+        else
+        {
+            $intervalDistance = $position-$lastPosition;
+            push(@interMarkerDistance, $intervalDistance);
+            $intervalDistanceTotal += $intervalDistance;
+            $minInterval = min($minInterval, $intervalDistance);
+            $maxInterval = max($maxInterval, $intervalDistance);    
+            $lastPosition = $position; 
+            ++$intervalNo;
+            
+            if ($intervalDistance <= $cutoff)
+            {
+                push(@currentCluster, $CHROM{$chromosome}{$position});
+            }
+            else
+            {
+                if (scalar(@currentCluster)>1)
+                {
+                    for my $i (0 .. $#currentCluster)
+                    {
+                        $clusters[$clusterNo][$i] = $currentCluster[$i];
+                    }
+                    $clusterNo++;
+                }
+
+                @currentCluster = ();
+                $currentCluster[0] = $CHROM{$chromosome}{$position};
+            }
+        }
+    }
+    
+    if($intervalNo==0)
+    {
+        $meanInterval = 'n/a';
+        $minInterval = 'n/a';
+        $maxInterval = 'n/a';
+        print INTERVAL "$chromosome\t$intervalNo\t$meanInterval\t$minInterval\t$maxInterval\n";
+    }
+    else
+    {
+        $meanInterval = $intervalDistanceTotal/$intervalNo;
+        printf INTERVAL "$chromosome\t$intervalNo\t%.2f\t$minInterval\t$maxInterval\n", $meanInterval;
+    }
+}
+
+print BLOCK "block-no\tblock-size\tchromosome\tleft-interval\tright-interval\taverage-interval\n";
+my %CLUSTER;
+my $contig = "snp-id\tchromosome\tposition\n";
+my $chosenSNPNo = 0;
+for my $i (0 .. $#clusters)
+{
+    my $blockSize = scalar(@{$clusters[$i]});
+    
+    print BLOCK ($i+1) . "\t" . $blockSize;
+    
+    $CLUSTER{$blockSize}++;
+    
+    if ($blockSize >= $minimumBlockSize)
+    {  
+        for my $snp (@{$clusters[$i]})
+        {
+            $contig .= "$snp\t$SNP{$snp}{CHROM}\t$SNP{$snp}{POSITION}\n";
+            ++$chosenSNPNo;
+        }
+    }   
+    
+    my $total = 0;
+    my $lastPosition;    
+    for my $position (map {$SNP{$_}{POSITION}} @{$clusters[$i]})
+    {
+        if(defined($lastPosition))
+        {
+            $total += $position - $lastPosition + 1;
+        }
+        
+        $lastPosition = $position;
+    }
+
+    printf BLOCK "\t$SNP{$clusters[$i][0]}{CHROM}\t$SNP{$clusters[$i][0]}{POSITION}\t$SNP{$clusters[$i][-1]}{POSITION}\t%.2f\n", $total/($blockSize-1);
+}
+
+$contigBlockFile = $chosenSNPNo . "snps-contig-block-c$cutoff-m$minimumBlockSize-$name.mk";
+open(CONTIG, ">$contigBlockFile") || die "Cannot open $contigBlockFile";
+print CONTIG $contig;
+
+my $blockFrequencyFile = "block-frequency-c$cutoff-m$minimumBlockSize-$name.mk";
+open(BLOCK_FREQ, ">$blockFrequencyFile") || die "Cannot open $blockFrequencyFile";
+print BLOCK_FREQ "block-size\tfrequency\n";
+for my $blockSize (sort {$a <=> $b} keys(%CLUSTER))
+{
+    print BLOCK_FREQ "$blockSize\t$CLUSTER{$blockSize}\n";
+}
+
+close(INTERVAL);
+close(BLOCK);
+close(CONTIG);

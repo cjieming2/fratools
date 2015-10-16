@@ -1,0 +1,277 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Path;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+frename
+
+=head1 SYNOPSIS
+
+ frename [options] file	
+
+  -h       detailed help message
+  -s       rename samples
+  -m       rename SNPs
+  -r       rename row labels
+  -c       rename column labels
+           note that you should only choose 1 of the above 4 options
+  -old     alternate old-name column (default old-name)
+  -new     alternate new-name column (default new-name)
+  -d       allow duplicate new names in renaming list (for renaming over different genotype files)
+  -l   	   rename list
+           a)old-name
+           b)new-name
+  file     can be a gt-file, tg-file or a regular tsv file
+  
+ example: frename -r -l rename-samples.txt pscalare.gt
+          frename -m -l rename-snps.txt pscalare.gt
+          frename -m -l rename-snps.txt pscalare.gt --old snp-id --new rs-id
+
+ Renames the samples or snps in a genotype file.
+ It will rename row and column labels in a table file too.
+ Output file will be renamed-<file>.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $renameSamples;
+my $renameRowLabels;
+my $renameFile;
+my $fraFile;
+my $newName = 'new-name';
+my $oldName = 'old-name';
+my $allowDuplicateNewNames;
+my $duplicateNamesInFileDetected = 0;
+my %RENAMED;
+my $headerProcessed = 0;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h' => \$help,
+				'l=s'=>\$renameFile,
+				'old=s'=>\$oldName,
+				'new=s'=>\$newName,
+				's'=>\$renameSamples,
+				'm'=> sub{$renameSamples=0},
+                'r'=>\$renameRowLabels,
+                'c'=> sub {$renameRowLabels=0},
+                'd'=>\$allowDuplicateNewNames)
+   || !defined($renameFile)
+   || !(defined($renameSamples) xor defined($renameRowLabels))
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$fraFile = $ARGV[0];
+
+if (!defined($renameRowLabels))
+{
+	#map from renaming samples/SNPs to renaming rows/columns
+	if($renameSamples)
+	{
+		if(isGt($fraFile))
+		{
+			$renameRowLabels = 1;
+		}
+		elsif(isTg($fraFile))
+		{
+			$renameRowLabels = 0;
+		}
+		else
+		{
+			die "$fraFile not a fra file";
+		}	
+	}
+	else
+	{
+		if(isGt($fraFile))
+		{
+			$renameRowLabels = 0;
+		}
+		elsif(isTg($fraFile))
+		{
+			$renameRowLabels = 1;
+		}
+		else
+		{
+			die "$fraFile not a fra file";
+		}
+	}
+}
+
+#transfer annotation file to memory
+open(RENAMEFILE, $renameFile) || die "Cannot open $renameFile";
+my $colNo;
+my %OLD2NEW_NAME;
+my %NEW2OLD_NAME;
+my %label2col;
+$headerProcessed = 0;
+while(<RENAMEFILE>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		SEARCH_LABEL: for my $label ($oldName, $newName)
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $label)
+				{			
+					$label2col{$label} = $col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			die "Cannot find '$label' in $renameFile";
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my $currentColumnNo = s/\t/\t/g + 1;
+		if($currentColumnNo!=$colNo) 
+		{
+			die "Row $. does not have the same number of columns as preceding rows: \n\t$_";
+		}
+		my @fields = split('\t', $_, $colNo);
+		
+		my $oldName = $fields[$label2col{$oldName}];
+		my $newName = $fields[$label2col{$newName}];
+		
+		if (length($oldName)==0 || length($newName)==0)
+		{
+			die "Empty name detected: $oldName, $newName";
+		}
+		
+		$OLD2NEW_NAME{$oldName} = $newName;
+		$NEW2OLD_NAME{$newName} = $oldName;
+	}
+}
+my $renameTotal = $.-1;
+close(RENAMEFILE);
+
+if (scalar(keys(%OLD2NEW_NAME)) != $renameTotal)
+{
+	die "old-name values not unique: " . scalar(keys(%OLD2NEW_NAME)) . "/$renameTotal ";
+}
+if (!$allowDuplicateNewNames && scalar(keys(%NEW2OLD_NAME)) != $renameTotal)
+{
+	die "new-name values not unique";
+}
+
+open (IN, $fraFile) || die "Cannot open $fraFile";
+my ($name, $path, $ext) = fileparse($fraFile, '\..*');
+my $outFile = "renamed-$name$ext";
+open (OUT, ">$outFile") || die "Cannot open $outFile";
+my $renamedNo = 0;
+$headerProcessed = 0;
+
+if($renameRowLabels)
+{		
+	while(<IN>)
+	{
+		s/\r?\n?$//;
+		
+		if (!$headerProcessed)
+		{		
+			print OUT "$_\n";
+			
+			$headerProcessed = 1;
+		}
+		else
+		{
+			my @fields = split('\t', $_, 2);
+			
+			if (exists($OLD2NEW_NAME{$fields[0]}))
+			{
+				print OUT $OLD2NEW_NAME{$fields[0]};
+				
+				$RENAMED{$fields[0]}++;
+				if($RENAMED{$fields[0]}==1)
+				{
+				    $renamedNo++;
+				}
+			}
+			else
+			{
+				print OUT $fields[0];
+			}
+			
+			$fields[1] = "" if (!defined($fields[1]));
+						
+			print OUT "\t$fields[1]\n";
+		}
+	}	
+}
+#rename column labels
+else
+{	
+	while(<IN>)
+	{
+		s/\r?\n?$//;
+		
+		if (!$headerProcessed)
+		{
+			$colNo = s/\t/\t/g + 1;
+			
+			my @fields = split('\t', $_, $colNo);
+					
+			print OUT "$fields[0]";	
+			for my $col (1..$#fields)
+			{
+				if(exists($OLD2NEW_NAME{$fields[$col]}))
+				{
+					print OUT "\t$OLD2NEW_NAME{$fields[$col]}";
+					
+					$RENAMED{$fields[$col]}++;
+    				if($RENAMED{$fields[$col]}==1)
+    				{
+    				    $renamedNo++;
+    				}
+				}
+				else
+				{
+					print OUT "\t$fields[$col]";
+				}
+			}
+			print OUT "\n";
+			
+			$headerProcessed = 1;
+		}
+		else
+		{
+			print OUT "$_\n";
+		}
+	}
+}
+close(IN);
+close(OUT);
+
+print "Old name column : $oldName\n";
+print "New name column : $newName\n";
+print "$renamedNo/$renameTotal renamed\n";

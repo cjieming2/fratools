@@ -1,0 +1,15 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use fralib;
+use POSIX qw(ceil floor);
+use File::Path;
+use Pod::Usage;
+
+while (1)
+{
+	sleep(5);
+	system("autoqsub -d");
+}

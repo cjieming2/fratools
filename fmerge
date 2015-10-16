@@ -1,0 +1,366 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+autorun
+
+=head1 SYNOPSIS
+
+ fmerge [options] <genotype-file>...    
+
+  -h             help
+  -o             output file (required)
+  genotype-file  can be a gt or tg file
+
+  example: fmerge -o merged-pterophyllum.gt pscalare.gt paltum.gt peimekki.tg
+
+  Merges a set of genotype files and outputs a gt-file.
+  The ouput gt-file is a union of ALL samples and SNPs, overlaps are resolved in 
+  the following manner:
+  
+  Combines genotypes by the following rules.
+  Note that genotype refers known data: 0,1,2
+  1)If a genotype occurs in majority, use majority genotype
+  2)If there is no majority genotype, use -1
+    
+  for 2 genotype files:
+  A vs ? => ? (pseudo-majority)
+  A vs G => ? (discordance)
+  A vs A => A (majority)
+  
+=head1 DESCRIPTION
+
+  1) No. of perfect concordance: The number of (sample, SNP) pairs that have 
+                                 only 1 CONSISTENTLY observed genotype. (includes
+                                 unknown observations)
+  2) No. of discordance:         The number of (sample, SNP) pairs with multiple 
+                                 observed genotypes that occur with equal maximal 
+                                 frequency.  The genotype for such pairs is set 
+                                 as unknown.
+  3) No. of majority:            The number of (sample, SNP) pairs that have multiple 
+                                 observed genotype of which there exists 1 UNIQUE 
+                                 genotype that occurs with the maximum frequency.
+                                 The genotype set for such pairs is the UNIQUE 
+                                 genotype.
+  4) No. of missing data:        The number of (sample, SNP) pairs that have NO 
+                                 observed genotypes.
+                       
+  Note that 1+2+3+4 = no. of samples x no. of SNPs observed in the datasets merged.
+  
+  The log of the merging of genotypes is output to STDOUT in the following format:
+  
+  <sample-id> <snp-id>
+        <geno-1> (<freq-1>)<geno-2> (<freq-2>) => <new-geno>
+  ...
+  <summary>
+  ...
+  
+  e.g.
+  137209122 rs3815875
+        0(1)-1(1)       =>      0
+  137209135 rs3735384
+        2(1)-1(1)       =>      2
+  137209768 rs3733920
+        1(1)-1(1)       =>      1
+  137209776 rs2254073
+        1(1)0(1)        =>      -1
+  No. of SNPs: 5707
+  No. of Samples: 935
+  No. of perfect concordance: 5295473
+  No. of discordance: 368
+  No. of majority: 70
+  No. of missing data: 40134
+
+=cut
+
+#option variables
+my $help;
+my $outFile;
+my $headerProcessed;
+my $colNo;;
+    
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'o=s'=>\$outFile) 
+   || !defined($outFile) || scalar(@ARGV)==0)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my %SNP;
+my %SAMPLE;
+
+#reads in each genotype file and picks up the SNPs and samples
+for my $file (@ARGV)
+{
+    my $header;
+
+        if(isTg($file))
+        {
+                $header = 'snp-id';
+        }
+        elsif(isGt($file))
+        {
+                $header = 'sample-id';
+        }
+        else
+        {
+                die "$file not a genotype file";
+        }
+    
+    open(IN, $file) || die "Cannot open $file";
+    $headerProcessed = 0;
+    
+    while(<IN>)
+    {
+        s/\r?\n?$//;
+        
+        if(!$headerProcessed)
+        {
+            $colNo = s/\t/\t/g + 1;
+            
+            my @fields = split('\t', $_, $colNo);
+            
+            if ($header eq 'snp-id')
+            {
+                for my $col (1..$#fields)
+                {
+                    $SAMPLE{$fields[$col]} = 1;
+                }
+            }
+            else
+            {
+                for my $col (1..$#fields)
+                {
+                    $SNP{$fields[$col]} = 1;
+                }
+            }
+            
+            $headerProcessed = 1;
+        }
+        else
+        {
+            my @fields = split('\t', $_, 2);
+            
+            if ($header eq 'snp-id')
+            {
+                $SNP{$fields[0]} = 1;
+            }
+            else
+            {
+                $SAMPLE{$fields[0]} = 1;
+            }           
+        }       
+    }
+
+    close(IN);
+}
+
+#setup array and indices
+my @sortedSNPs = sort(keys(%SNP));
+my @sortedSamples = sort(keys(%SAMPLE));
+
+map {$SNP{$sortedSNPs[$_]}=$_} (0..$#sortedSNPs);
+map {$SAMPLE{$sortedSamples[$_]}=$_} (0..$#sortedSamples);
+
+my @MERGED_GENO;
+
+#populate array
+#reads in each genotype file and picks up the SNPs and samples
+for my $file (@ARGV)
+{
+    my $header;
+
+    if(isTg($file))
+    {
+        $header = 'snp-id';
+    }
+    elsif(isGt($file))
+    {
+        $header = 'sample-id';
+    }
+    else
+    {
+        die "$file not a genotype file";
+    }
+
+    open(IN, $file) || die "Cannot open $file";
+    $headerProcessed = 0;
+    
+    my $colNo;
+    my @fields;
+    
+    if ($header eq 'snp-id')
+    {
+        my @col2sample;
+        
+        while(<IN>)
+        {
+            s/\r?\n?$//;
+            
+            if(!$headerProcessed)
+            {
+                $colNo = s/\t/\t/g + 1;
+                @fields = split('\t', $_, $colNo);              
+
+                for my $col (1 .. $#fields)
+                {               
+                    $col2sample[$col] = $fields[$col];
+                }
+                
+                $headerProcessed = 1;
+            }
+            else
+            {
+                @fields = split('\t', $_, $colNo);
+
+                my $snp = $fields[0];               
+
+                for my $col (1 .. $#fields)
+                {
+                    $MERGED_GENO[$SAMPLE{$col2sample[$col]}][$SNP{$snp}]{$fields[$col]}++;  
+                }
+            }       
+        }
+    }
+    else
+    {
+        my @col2snp;
+        
+        while(<IN>)
+        {
+            s/\r?\n?$//;
+            
+            if(!$headerProcessed)
+            {
+                $colNo = s/\t/\t/g + 1;
+                @fields = split('\t', $_, $colNo);              
+
+                for my $col (1 .. $#fields)
+                {               
+                    $col2snp[$col] = $fields[$col];
+                }
+                
+                $headerProcessed = 1;
+            }
+            else
+            {
+                @fields = split('\t', $_, $colNo);
+                my $sample = $fields[0];
+                
+                for my $col (1 .. $#fields)
+                {               
+                    $MERGED_GENO[$SAMPLE{$sample}][$SNP{$col2snp[$col]}]{$fields[$col]}++;  
+                }
+            }       
+        }
+    }
+    
+    close(IN);
+}
+
+open(OUT, ">$outFile") || die "Cannot open $outFile";
+my $perfectConcordance = 0;
+my $discordance = 0;
+my $majority = 0;
+my $missingData = 0;
+
+#prints out genotype
+print OUT "sample-id\t" . join("\t", @sortedSNPs) . "\n";
+for my $row (0 .. $#sortedSamples)
+{   
+    print OUT $sortedSamples[$row];
+    
+    for my $col (0 .. $#sortedSNPs)
+    {   
+        my %genotypes;
+        my $val;
+        
+        #no data
+        if (!defined($MERGED_GENO[$row][$col]))
+        {
+            $missingData++;
+            $MERGED_GENO[$row][$col]{'-1'} = 1;
+            $val = -1;
+        }
+        else
+        {
+            %genotypes = %{$MERGED_GENO[$row][$col]};
+            $val = "";
+            
+            #perfect concordance
+            if(scalar(keys(%genotypes))==1)
+            {
+                $perfectConcordance++;
+                my @k = keys(%genotypes);       
+                $val =  $k[0];
+            }
+            else
+            {
+                my %GENOTYPE_COUNTS;
+                $val = "";
+                
+                print "$sortedSamples[$row] $sortedSNPs[$col]\n";
+                
+                for my $key (keys(%genotypes))
+                {
+                    #print "\t$key\n";
+                    $val .= "$key(" . $genotypes{$key} . ")";
+                
+                    if ($key != -1)
+                    {
+                        $GENOTYPE_COUNTS{$genotypes{$key}}{$key}++; 
+                    }
+                }
+                
+                print "\t$val";
+                
+                my @sortedGenotype = sort {$a<=>$b} keys(%GENOTYPE_COUNTS);
+                my %majorityGenotypes = %{$GENOTYPE_COUNTS{$sortedGenotype[-1]}};
+                my $majorityGenotypeNo = scalar(keys(%majorityGenotypes));
+    
+                #majority
+                if($majorityGenotypeNo==1)
+                {
+                    $majority++;
+                    my @k = keys(%majorityGenotypes);
+                    $val = $k[0];
+                }
+                #no majority
+                else
+                {               
+                    $discordance++;
+                    $val = '-1';
+                }
+                
+                print "\t=>\t$val\n";
+            }
+        }
+        
+        print OUT "\t$val";
+    }
+    
+    print OUT "\n";
+}
+
+#map {print "$sortedSamples[$_]\t$_\n"} (0..$#sortedSamples);
+print "No. of SNPs: " . scalar(@sortedSNPs) . "\n";
+print "No. of Samples: " . scalar(@sortedSamples) . "\n";
+print "No. of perfect concordance: $perfectConcordance\n";
+print "No. of discordance: $discordance\n";
+print "No. of majority: $majority\n";
+print "No. of missing data: $missingData\n";

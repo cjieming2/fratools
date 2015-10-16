@@ -1,0 +1,341 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Cwd;
+use File::Basename;
+use Pod::Usage;
+use DBI;
+
+=head1 NAME
+
+fcoverage
+
+=head1 SYNOPSIS
+
+fcoverage [options] <hapmap-ld-file>
+  
+ -h                 help
+ -m                 mk-file
+                    a)snp-id
+                    b)chromosome
+ hapmap-ld-file     Hapmap LD files
+                    Col1: Chromosomal position of marker1
+                    Col2: chromosomal position of marker2
+                    Col3: population code
+                    Col4: rs# for marker1
+                    Col5: rs# for marker2
+                    Col6: Dprime
+                    Col7: R square
+                    Col8: LOD
+                    Col9: fbin ( index based on Col1 )   
+  
+ example: fcoverage -m pscalare.mk ld_chr1_CHB.txt.gz
+ 
+ Calculates the coverage of a set of SNPs with respect to Hapmap SNPs.
+ 
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $colNo;
+my $headerProcessed;
+my %label2Column;
+my $mkFile;
+my $distance;
+my $rsquare;
+my %COVERAGE;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+=comment until
+my $dsn = "DBI:mysql:database=tana2;host=10.217.28.55;port=3306";
+
+my $dbh = DBI->connect($dsn, 'tana2', 'd35c4r735');
+
+#$drh = DBI->install_driver("mysql");
+#@databases = $drh->func($host, $port, '_ListDBs');
+
+my $sth = $dbh->prepare("SELECT chrom, count(distinct name) as count from hg17_snp125 where class = 'single' group by chrom");
+$sth->execute();
+my $numRows = $sth->rows();
+my $numFields = $sth->{'NUM_OF_FIELDS'};
+
+while (my $ref = $sth->fetchrow_hashref()) 
+{
+    print "Found a row: chrom = $ref->{'chrom'}, chromEnd = $ref->{'count'}\n";
+}
+
+$sth->finish;
+
+print "no: $numRows, fields: $numFields\n"; 
+
+exit;
+=cut
+
+if(!GetOptions ('h'=>\$help, 'm=s'=>\$mkFile)
+   || !defined($mkFile) || scalar(@ARGV) < 1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$| = 1;
+
+#number of SNPs found on each chromosome.
+#src: dbSNP125
+my %G = (
+    1 => 751709,
+    2 => 720429,
+    3 => 593937,
+    4 => 626066,
+    5 => 555675,
+    6 => 631748,
+    7 => 517752,
+    8 => 466619,
+    9 => 462733,
+    10 => 489372,
+    11 => 485392,
+    12 => 448870,
+    13 => 350176,
+    14 => 278854,
+    15 => 266559,
+    16 => 305235,
+    17 => 238589,
+    18 => 254717,
+    19 => 200441,
+    20 => 264461,
+    21 => 142382,
+    22 => 174748,
+    X => 381595
+);
+
+for my $file (@ARGV)
+{   
+    print "processing $file ... ";
+    
+    my %R; #reference
+    my %T; #tagged
+    my %L; #ld with SNP in T
+    
+    my ($name, $path, $ext) = fileparse($file, '\..*');
+    
+    my $isZipped = $ext =~ /\.gz$/ ? 1 : 0;
+    
+    #ld_chr6_YRI.txt.gz
+    $name =~ /ld_chr(.*)_(.*)/;
+    my $chromosome = uc($1);
+    
+    print "reading in chromosome $chromosome snps ... ";
+    #read snp annotation
+    open(MK, $mkFile) || die "Cannot open $mkFile";
+    $headerProcessed = 0;
+    while(<MK>)
+    {
+        s/\r?\n?$//;
+        
+        if(!$headerProcessed)
+        {
+            $colNo = s/\t/\t/g + 1;
+            
+            my @fields = split('\t', $_, $colNo);
+             
+            SEARCH_LABEL: for my $label ('snp-id', 'chromosome')
+            {
+                for my $col (0 .. $#fields)
+                {
+                    if ($fields[$col] eq $label)
+                    {           
+                        $label2Column{$label}=$col;
+                        next SEARCH_LABEL;
+                    }
+                }
+    
+               	die "Cannot find '$label' in $mkFile";
+            }
+            
+            $headerProcessed = 1;
+        }
+        else
+        {
+            my @fields = split('\t', $_, $colNo);
+            my $rsID = $fields[$label2Column{'snp-id'}];
+            if($chromosome eq $fields[$label2Column{'chromosome'}])
+            {
+                if (!exists($T{$rsID}))
+                {
+                    $T{$rsID} = 0;
+                }
+                else
+                {
+        			warn "duplicate rsID : $rsID";
+                }
+            }
+        }
+    }
+    close(MK);
+        
+    if($isZipped)
+    {
+        print "unzipping ...";
+        system("gunzip $file") == 0 || die "gunzip failed: $?";
+    }
+    
+    print "computing ...";   
+    
+    open(LD, "$file") || die "Cannot open $file";
+    while(<LD>)
+    {
+        s/\r?\n?$//;
+
+        print "." if ($.%1000000==1);
+
+        #72434 78032 CHB rs4030303 rs940550 1.0 0.0 0.0 0        
+        my @fields = split(" ");
+        
+        $distance = abs($fields[0] - $fields[1]);
+        $rsquare = $fields[6];
+        
+        $R{$fields[3]} = 1;
+        $R{$fields[4]} = 1;
+        
+        if (exists($T{$fields[3]}) && exists($T{$fields[4]}))
+        {
+            $T{$fields[3]} = 1;
+            $T{$fields[4]} = 1;
+        }
+        
+        elsif (!exists($T{$fields[3]}) && exists($T{$fields[4]}))
+        {
+            for my $cutoff (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+            {
+                if ($rsquare >= $cutoff)
+                {
+                    $T{$fields[4]} = 1;
+                    $L{$cutoff}{$fields[3]} = 1;
+                }
+            }
+        }
+        elsif (!exists($T{$fields[4]}) && exists($T{$fields[3]}))
+        {
+            for my $cutoff (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+            {
+                if ($rsquare >= $cutoff)
+                {
+                    $T{$fields[3]} = 1;
+                    $L{$cutoff}{$fields[4]} = 1;
+                }
+            }
+        }
+    }    
+    close(LD);
+
+    #open(D, ">$name.D") || die "Cannot open $name.D";
+    #open(T, ">$name.T") || die "Cannot open $name.T";
+    #open(R, ">$name.R") || die "Cannot open $name.R";
+    #open(U, ">$name.U") || die "Cannot open $name.U";
+        
+    my $D = 0;
+    for my $snp (keys(%T))
+    {
+        if ($T{$snp} == 0)
+        {
+             #print D "$snp\n";
+            $D++;
+        }
+        else
+        {
+            #print T "$snp\n";
+        }
+    }
+    #close(D);
+    #close(T);
+
+    #for my $snp (keys(%R))
+    #{
+    #    print R "$snp\n";
+    #    
+    #    if (!exists($T{$snp}) && !exists($L{$snp}))
+    #    {
+    #        print U "$snp\n";
+    #    }
+    #}
+    #close(R);
+    #close(U);
+    
+    $COVERAGE{$chromosome}{D} = $D;
+    $COVERAGE{$chromosome}{T} = scalar(keys(%T)) - $D;
+    $COVERAGE{$chromosome}{R} = scalar(keys(%R));
+    for my $cutoff (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+    {
+        $COVERAGE{$chromosome}{L}{$cutoff} = scalar(keys(%{$L{$cutoff}}));
+        
+        
+        #open(L, ">$name.$cutoff.L") || die "Cannot open $name.$cutoff.L";
+        #for my $snp (keys(%{$L{$cutoff}}))
+        #{
+        #    print L "$snp\n";
+        #}
+        #close(L);
+    }   
+
+    if($isZipped)
+    {
+        print "zipping ... ";
+        system("gzip $path$name.txt") == 0 || die "gzip failed: $?";
+    }    
+
+    print " done\n"; 
+}
+
+my $totalD = 0;
+my $totalT = 0;
+my $totalR = 0;
+my $totalG = 0;
+my %totalL = ();
+
+print "chromosome\tG\tFd\tFt\tFtotal\tD\tT\tR\tL:0.0\tL:0.1\tL:0.2\tL:0.3\tL:0.4\tL:0.5\tL:0.6\tL:0.7\tL:0.8\tL:0.9\tL:1.0\n";
+for my $chromosome (sort {if ("$a$b"=~/\D/) {$a cmp $b} else {$a <=> $b}} keys(%COVERAGE))
+{
+    my $D = $COVERAGE{$chromosome}{D};
+    my $T = $COVERAGE{$chromosome}{T};
+    my $R = $COVERAGE{$chromosome}{R};
+    my $G = $G{$chromosome};
+    my $L;
+    $totalD += $D;
+    $totalT += $T;
+    $totalR += $R;
+    $totalG += $G;
+  
+    printf "$chromosome\t$G\t%.4f\t%.4f\t%.4f\t$D\t$T\t$R", $D/$G, $T/$G, ($D+$T)/$G;
+    for my $cutoff (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+    {
+        $L = $COVERAGE{$chromosome}{L}{$cutoff};
+        $totalL{$cutoff} += $L;
+        
+        printf "\t$L(%.4f)", (($L/($R-$T))*($G-$T) + $T + $D) / $G;
+        #printf "\t$L(%.4f)", ($L + $T) / $R;
+    }
+    
+    print "\n";
+}
+
+printf "genome\t$totalG\t%.4f\t%.4f\t%.4f\t$totalD\t$totalT\t$totalR", $totalD/$totalG, $totalT/$totalG, ($totalD+$totalT)/$totalG;
+for my $cutoff (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+{   
+    printf "\t$totalL{$cutoff}(%.4f)", (($totalL{$cutoff}/($totalR-$totalT))*($totalG-$totalT) + $totalT + $totalD) / $totalG;
+    #printf "\t$L(%.4f)", ($L + $T) / $R;
+}
+
+print "\n";

@@ -1,0 +1,155 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use warnings;
+use Cwd;
+use Cwd 'abs_path';
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+
+=head1 NAME
+
+ sa2hscplot 
+
+=head1 SYNOPSIS
+
+ sa2hscplot [options] <sample-call-file>
+
+ -o                 output file name
+                    Default output file is <sample-call-file>-hscplot.pdf
+ -u                 plot [0,1] on both axes
+ -p                 Point Character: 0-25 (Default 1)
+                    http://www.phaget4.org/R/plot.html
+ -c                 Colour : black, red, blue, green (Default black)
+ sample-call-file   sample call rate file
+                    a)sample-id
+                    b)A_A
+                    c)A_B
+                    d)B_B
+                    e)sample-call-rate
+
+ example: sa2hscplot samples.txt
+
+ Saves a plot of sample heterozygosity vs sample call rate in pdf format.
+ 
+=head1 DESCRIPTION
+
+ Saves a plot of sample heterozygosity vs sample call rate in pdf format
+
+=cut
+
+## Global variables
+my $outputFileName = '';
+my $inputFile = '';
+my $inputDir = '';
+my %COL_HEADERS = (
+    'sample-id' => -1, 
+    'A_A' => -1, 
+    'A_B' => -1, 
+    'B_B' => -1, 
+    'sample-call-rate' => -1);
+
+## Option variables
+my $help;
+my $axesAreUnity;
+my $pointCharacter = 1;
+my $colour = 'black';
+
+## Main Script
+# initialize options
+Getopt::Long::Configure('bundling');
+if(!GetOptions ('h'=>\$help,'u'=>\$axesAreUnity,'o=s'=>\$outputFileName, 'p=i'=>\$pointCharacter, 'c=s'=>\$colour) 
+    || scalar(@ARGV)!=1
+    || $pointCharacter!~/^([12]?[0-5]|1?[6-9])$/
+    || $colour!~/^(black|blue|green|red)$/)  {
+    if ($help)  {
+        pod2usage(-verbose => 2);
+    }
+    else  {
+        pod2usage(1);
+    }
+}
+$inputFile = $ARGV[0];
+if($outputFileName eq '')  {
+  my($filename, $directories, $suffix) = fileparse($inputFile, '\..*');
+  $outputFileName = $filename . '-hscplot.pdf';
+  $inputDir = abs_path($directories);
+}
+$outputFileName .= '.pdf' unless($outputFileName =~ /\.pdf$/i);
+
+
+# check file correctness
+open(iFILE, "< $inputFile") or die "Can't open sample call rate file - $inputFile :: $! \n";
+my $header = <iFILE>;
+chomp($header);
+my @fields = split(/\t/, $header);
+foreach my $i (0 .. $#fields)  {
+  if(exists $COL_HEADERS{$fields[$i]})  {
+    $COL_HEADERS{$fields[$i]} = $i;
+  }
+}
+close iFILE;
+foreach my $key (keys %COL_HEADERS)  {
+  die "Can't find required header - $key - in $inputFile \n" if($COL_HEADERS{$key} == -1);
+}
+
+
+# Load inputfile to R to generate plot
+my $currDir = cwd();
+
+open(oFILE, "> $currDir/R.input") or die "Can't create temp R input file :: $! \n";
+if($axesAreUnity)
+{
+    print oFILE <<RSCRIPT;
+data <- read.table(\"$inputDir/$inputFile\", header=1 );
+samples <- transform( data, miss.rate=1-data\$sample.call.rate, hetero.rate=data\$A_B/(data\$A_A+data\$A_B+data\$B_B) );
+pdf(\"$currDir/$outputFileName\");
+plot( samples\$sample.call.rate, 
+      samples\$hetero.rate, 
+      main="Sample Heterozygosity vs Sample Call Rate", 
+      xlab="Sample Call Rate", 
+      ylab="Sample Heterozygosity Rate", 
+      xlim=c(0,1), 
+      ylim=c(0,1),
+      pch=$pointCharacter,
+      col=\"$colour\");
+dev.off();
+q();
+
+RSCRIPT
+}
+else
+{
+    print oFILE "data <- read.table(\"$inputDir/$inputFile\", header=1 ); \n"; 
+    print oFILE 'samples <- transform( data, miss.rate=1-data$sample.call.rate, hetero.rate=data$A_B/(data$A_A+data$A_B+data$B_B) );', "\n";
+    print oFILE "pdf(\"$currDir/$outputFileName\"); \n";
+    print oFILE 'plot( samples$sample.call.rate, samples$hetero.rate, main="Sample Heterozygosity vs Sample Call Rate", xlab="Sample Call Rate", ylab="Sample Heterozygosity Rate",', " pch=$pointCharacter, col=\"$colour\");\n";
+    print oFILE "dev.off(); \n";
+    print oFILE "q(); \n";
+}
+close oFILE;
+
+system("R --vanilla <$currDir/R.input &>$currDir/R.log") == 0 || die "Plotting failed, please check R.input and R.log";
+ 
+if ($? == -1) 
+{
+    warn "failed to execute: $!\n";
+}
+elsif ($? & 127) 
+{
+    printf STDERR "child died with signal %d, %s coredump\n", ($? & 127),  ($? & 128) ? 'with' : 'without';
+}
+else 
+{
+    unlink("$currDir/R.input");
+    unlink("$currDir/R.log");
+}
+
+
+
+
+
+__END__

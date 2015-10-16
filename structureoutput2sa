@@ -1,0 +1,171 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use fralib;
+use File::Basename;
+use POSIX qw(ceil floor);
+use File::Path;
+use Pod::Usage;
+
+=head1 NAME
+
+structureoutput2sa
+
+=head1 SYNOPSIS
+
+ structureoutput2sa [options] structure-output-file
+	
+  -h                     help
+  structure-output-file  structure output file containing membership coefficients
+
+ example: structureoutput2sa pscalare_f
+ 
+ Extracts the cluster membership coefficients of each sample from a structure output file.
+ 
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $structureOutputFile;
+my $saFile;
+my $dataFound = 0;
+my $K;
+my $confidenceIntervalsPresent = 0;
+my $confidence;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions('h'=>\$help) 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$structureOutputFile = $ARGV[0];
+
+open(STRUCTURE_OUTPUT, $structureOutputFile) || die "Cannot open $structureOutputFile";
+
+undef($/);
+
+$_ = <STRUCTURE_OUTPUT>;
+
+if (/ANCESTDIST=1/)
+{
+    $confidenceIntervalsPresent = 1;
+
+    if (/ANCESTPINT=([\d]+.[\d]+)/)
+    {
+        $confidence = (100*$1); 
+    }
+}
+seek(STRUCTURE_OUTPUT, 0, 0);
+$/="\n";
+
+while(<STRUCTURE_OUTPUT>)
+{
+    s/\r?\n?$//;
+	if (/(\d+) populations assumed/)
+	{
+		$K = $1;
+	}
+    elsif (/Label\s+\(%Miss\)\s+Pop:\s+Inferred clusters/)
+	{		
+		$dataFound = 1;
+		
+		if (!defined($saFile))
+		{
+			my ($name, $dir, $ext) = fileparse($structureOutputFile, '_f');
+			$saFile = "$name.sa";
+		}
+		
+		open (SA, ">$saFile") || die "Cannot open $saFile";
+
+		print SA "sample-id";
+		
+		for my $clusterNo (1 .. $K)
+		{
+		    if ($confidenceIntervalsPresent)
+		    {
+		        print SA "\tcluster-$clusterNo\tcluster-$clusterNo-L$confidence\tcluster-$clusterNo-H$confidence";
+		    }
+		    else
+		    {
+			    print SA "\tcluster-$clusterNo";
+		    }
+		}
+
+		print SA "\n";
+		
+		while(<STRUCTURE_OUTPUT>)
+		{
+			s/\r?\n?$//;
+			
+			if (!/^$/)
+			{
+			    if ($confidenceIntervalsPresent)
+			    {
+    				my @fields = split(/\s+/, trim($_));
+    	  
+    	  			if ($#fields-4 != 2*$K)
+    	  			{
+    	  				die "Number of assumed populations wrongly detected: $K vs " . ($#fields-4);
+    	  			}
+    	  
+    	  			print SA $fields[1];
+    	  			
+    	  			for my $col (5 .. $#fields-$K)
+    				{
+    				    $fields[$col+$K]=~/\(([01]\.\d+),([01]\.\d+)\)/;
+    				    
+    					print SA "\t$fields[$col]\t$1\t$2";
+    				}
+    				
+    				print SA "\n";
+			    }
+                else
+                {
+    				my @fields = split(/\s+/, trim($_));
+    	  
+    	  			if ($#fields-4 != $K)
+    	  			{
+    	  				die "Number of assumed populations wrongly detected: $K vs " . ($#fields-4);
+    	  			}
+    	  
+    	  			print SA $fields[1];
+    	  			
+    	  			for my $col (5 .. $#fields)
+    				{
+    					print SA "\t$fields[$col]";
+    				}
+    				
+    				print SA "\n";
+			    }
+			}
+			else
+			{
+				last;
+			}
+		}
+		
+		close(SA);
+	}
+}
+
+if (!$dataFound)
+{
+	warn "Can't find individual cluster membership coefficients in $structureOutputFile";
+}
+
+close(STRUCTURE_OUTPUT);

@@ -1,0 +1,444 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+gt2structure
+
+=head1 SYNOPSIS
+
+ gt2structure [options] <genotype-file>  
+
+  -v       verbose
+  -d       debug
+  -a       autosomal snps only
+  -s       sample annotation file (required)
+           a)sample-id
+           b)population-id
+           c)sex
+  -m       snp annotation file (not required if autosomal switch is on)
+           a)snp-id
+           b)chromosome
+  gt-file  sample major genotype file
+
+ example: gt2structure -s pscalare.sa -m pscalare.mk pscalare.gt
+          gt2structure -s pscalare.sa -a pscalare.gt
+         
+ Outputs structure input data file and parameter files.
+ Also outputs a population id and population name tab delimited file. 
+
+ structure -c 2 -n <numpops> -o <output-file> -i pscalare.dat
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $verbose;
+my $debug;
+my $help;
+my $gtFile;
+my $sampleAnnotationFile;
+my $snpAnnotationFile;
+my $paramFile;
+my $extraParamFile;
+
+#common data variables
+my $colNo;
+my %label2col;
+
+#data structures
+my %SAMPLE;
+my %SNP;
+my %POPULATION;
+my $snpNo;
+my $sampleNo;
+my $popNo;
+my @col2snp;
+my $autosomal;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('v'=>\$verbose, 'd'=>\$debug, 'h'=>\$help, 's=s'=>\$sampleAnnotationFile, 'm=s'=>\$snpAnnotationFile, 'a'=>\$autosomal) 
+   ||!defined($sampleAnnotationFile) || (!$autosomal && !defined($snpAnnotationFile)) || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$gtFile = $ARGV[0];
+
+#checks if input is not a genotype file
+isGt($gtFile) || die "$gtFile not a gt file";
+
+#read sample annotation
+open(SAMPLE_ANNOTATION, $sampleAnnotationFile) || die "Cannot open $sampleAnnotationFile";
+while(<SAMPLE_ANNOTATION>)
+{
+    s/\r?\n?$//;
+    
+    if($.==1)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        my @labels;
+        if ($autosomal)
+        {
+            @labels = ('sample-id', 'population-id');
+        }
+        else
+        {
+            @labels = ('sample-id', 'population-id', 'sex');
+        }
+        
+        SEARCH_LABEL: for my $label (@labels)
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2col{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $sampleAnnotationFile";
+        }
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $sampleID = $fields[$label2col{'sample-id'}];
+        my $population = $fields[$label2col{'population-id'}];
+                        
+        $SAMPLE{$sampleID}{POPULATION} = $population;
+        $POPULATION{$population}{ID} = 0;
+        
+        if (!$autosomal)
+        {
+            my $sex = $fields[$label2col{'sex'}];
+            $SAMPLE{$sampleID}{SEX} = $sex;
+        }
+    }
+}
+close(SAMPLE_ANNOTATION);
+
+if (!$autosomal)
+{
+    #read SNP annotation
+    open(SNP_ANNOTATION, $snpAnnotationFile) || die "Cannot open $snpAnnotationFile";
+    while(<SNP_ANNOTATION>)
+    {
+        s/\r?\n?$//;
+        
+        if($.==1)
+        {
+            $colNo = s/\t/\t/g + 1;
+            
+            my @fields = split('\t', $_, $colNo);
+            
+            SEARCH_LABEL: for my $label ('snp-id', 'chromosome')
+            {
+                for my $col (0 .. $#fields)
+                {
+                    if ($fields[$col] eq $label)
+                    {           
+                        $label2col{$label}=$col;
+                        next SEARCH_LABEL;
+                    }
+                }
+                
+                die "Cannot find '$label' in $snpAnnotationFile";
+            }
+        }
+        else
+        {
+            my @fields = split('\t', $_, $colNo);
+            my $snpID = $fields[$label2col{'snp-id'}];
+            my $chromosome = $fields[$label2col{'chromosome'}];
+                    
+            $SNP{$snpID}{CHROMOSOME} = $chromosome;
+        }
+    }
+    close(SNP_ANNOTATION);
+}
+
+#prepare structure data file
+open (GENO, $gtFile) || die "Cannot open $gtFile";
+$popNo = 0;
+my ($name, $path, $ext) = fileparse($ARGV[0], '\..*');
+my $dataFile = "$name.dat";
+open (DATA, ">$dataFile") || die "Cannot open $dataFile";
+my $popIdNameFile = "popid-popname-$name.txt";
+open (POP_ID_NAME, ">$popIdNameFile") || die "Cannot open $popIdNameFile";
+
+while (<GENO>)
+{
+    s/\r?\n?$//;
+    
+    if($.==1)
+    {
+        $colNo = s/\t/\t/g + 1;
+        $snpNo = $colNo - 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        for my $col (1..$#fields)
+        {
+            $col2snp[$col] = $fields[$col];
+        }
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $sample = $fields[0];
+        
+        exists($SAMPLE{$sample}) || die "$sample not found in $sampleAnnotationFile";
+        
+        my $sampleID = $.-1;
+        my $sex = $SAMPLE{$sample}{SEX} if (!$autosomal);
+        my $population = $SAMPLE{$sample}{POPULATION};
+        my $populationID = $POPULATION{$population}{ID};
+        my $genotype;
+        my $snp;
+        
+        if ($populationID==0)
+        {
+            $populationID = ++$popNo;
+            $POPULATION{$population}{ID} = $populationID;
+            print POP_ID_NAME "$populationID\t$population\n"
+        }
+        
+        if ($autosomal || $sex eq 'female')
+        {
+            print DATA "$sample\t$populationID";
+            for my $col (1..$#fields)
+            {
+                $genotype = $fields[$col];
+                
+                if($genotype==0)
+                {
+                    print DATA "\t1";
+                }
+                elsif($genotype==1)
+                {
+                    print DATA "\t1";
+                }
+                elsif($genotype==2)
+                {
+                    print DATA "\t2";
+                }
+                elsif($genotype==-1)
+                {
+                    print DATA "\t-1";
+                }
+                else
+                {
+                    die "Unrecognised genotype: $genotype at $col";
+                }
+            }
+            print DATA "\n";
+            
+            print DATA "$sample\t$populationID";
+            for my $col (1..$#fields)
+            {
+                $genotype = $fields[$col];
+                
+                if($genotype==0)
+                {
+                    print DATA "\t1";
+                }
+                elsif($genotype==1)
+                {
+                    print DATA "\t2";
+                }
+                elsif($genotype==2)
+                {
+                    print DATA "\t2";
+                }
+                elsif($genotype==-1)
+                {
+                    print DATA "\t-1";
+                }
+                else
+                {
+                    die "Unrecognised genotype: $genotype at $col";
+                }
+            }
+            print DATA "\n";
+        }
+        elsif ($sex eq 'male')
+        {
+            print DATA "$sample\t$populationID";
+            for my $col (1..$#fields)
+            {
+                my $snp = $col2snp[$col];
+                $genotype = $fields[$col];
+                
+                if ($SNP{$snp}{CHROMOSOME} eq 'X')
+                {
+                    if($genotype==0)
+                    {
+                        print DATA "\t1";
+                    }
+                    elsif($genotype==1)
+                    {
+                        print DATA "\t-1";
+                    }
+                    elsif($genotype==2)
+                    {
+                        print DATA "\t2";
+                    }
+                    elsif($genotype==-1)
+                    {
+                        print DATA "\t-1";
+                    }
+                    else
+                    {
+                        die "Unrecognised genotype: $genotype at $col";
+                    }
+                }
+                else
+                {
+                    if($genotype==0)
+                    {
+                        print DATA "\t1";
+                    }
+                    elsif($genotype==1)
+                    {
+                        print DATA "\t1";
+                    }
+                    elsif($genotype==2)
+                    {
+                        print DATA "\t2";
+                    }
+                    elsif($genotype==-1)
+                    {
+                        print DATA "\t-1";
+                    }
+                    else
+                    {
+                        die "Unrecognised genotype: $genotype at $col";
+                    }
+                }
+            }
+            print DATA "\n";
+            
+            print DATA "$sample\t$populationID";
+            for my $col (1..$#fields)
+            {
+                my $snp = $col2snp[$col];
+                $genotype = $fields[$col];
+                
+                if ($SNP{$snp}{CHROMOSOME} eq 'X')
+                {
+                    if($genotype==0)
+                    {
+                        print DATA "\t-1";
+                    }
+                    elsif($genotype==1)
+                    {
+                        print DATA "\t-1";
+                    }
+                    elsif($genotype==2)
+                    {
+                        print DATA "\t-1";
+                    }
+                    elsif($genotype==-1)
+                    {
+                        print DATA "\t-1";
+                    }
+                    else
+                    {
+                        die "Unrecognised genotype: $genotype at $col";
+                    }
+                }
+                else
+                {
+                    if($genotype==0)
+                    {
+                        print DATA "\t1";
+                    }
+                    elsif($genotype==1)
+                    {
+                        print DATA "\t2";
+                    }
+                    elsif($genotype==2)
+                    {
+                        print DATA "\t2";
+                    }
+                    elsif($genotype==-1)
+                    {
+                        print DATA "\t-1";
+                    }
+                    else
+                    {
+                        die "Unrecognised genotype: $genotype at $col";
+                    }
+                }
+            }
+            print DATA "\n";
+        }
+        else
+        {
+            die "Unrecognised sex: $sample, $sex";
+        }
+    }
+}
+$sampleNo = $. - 1;
+
+close(GENO);
+close(POP_ID_NAME);
+close(DATA);
+
+#prepare structure options file
+$paramFile = "mainparams";
+open (PARAMETERS, ">$paramFile") || die "Cannot open $paramFile";
+print PARAMETERS <<PARAMS;
+#define INFILE $dataFile
+#define OUTFILE $dataFile
+#define NUMINDS $sampleNo
+#define NUMLOCI $snpNo
+#define LABEL 1
+#define POPDATA 1
+#define POPFLAG 0
+#define PHENOTYPE 0
+#define EXTRACOLS 0
+#define PHASEINFO 0
+#define MISSING -1
+#define PLOIDY 2
+#define ONEROWPERIND 0
+#define MAPDISTANCES 0
+#define MAXPOPS $popNo
+#define BURNIN 10000
+#define NUMREPS 10000
+#define INFERLAMBDA 0
+#define FREQSCORR 1
+PARAMS
+close(PARAMETERS);
+
+$extraParamFile = "extraparams";
+open (EXTRA_PARAMETERS, ">$extraParamFile") || die "Cannot open $extraParamFile";
+print EXTRA_PARAMETERS <<EXTRA_PARAMS;
+#define ANCESTDIST 1
+EXTRA_PARAMS
+close(EXTRA_PARAMETERS);
+
+print "No of samples: $sampleNo\n";
+print "No of snps: $snpNo\n";
+print "No of populations: $popNo\n";

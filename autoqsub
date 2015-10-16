@@ -1,0 +1,254 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+use Fcntl ':flock';
+use Time::HiRes;
+use Sys::Hostname;
+use Socket;
+
+=head1 NAME
+
+autoqsub
+
+=head1 SYNOPSIS
+
+  autoqsub [options] <main-command> <file>...  
+
+   -h       help
+   -d       daemon mode
+   -q       view queue
+   -t       test, just print out commands
+  --enum    enumerate place holder with numbers
+
+   to run jobs
+   example: autoqsub "ftranspose %" *.gt
+            autoqsub "structure -K % -o % > %.log" --enum 2-5
+            autoqsub "structure -K % -o % > %.log" --enum 2-5
+            autoqsub "module load R; cat %.r | R --vanilla > %.log 2> %.err" pscalare
+					  autoqsub "module load R; cat %.r | R --vanilla > %.log 2> %.err" pscalare -q bladejr
+
+   to invoke daemon
+   example: autoqsub -d
+                
+  Submits multiple jobs to pbs via qsub.
+ 
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $memory = '1gb';
+my $test;
+my $generateLogs;
+my $enumerate;
+my $runDaemon = 0;
+my $viewQueue;
+my $queue;
+
+#variables
+my $autoqsubHomeDirectory = "$ENV{HOME}/.autoqsub";
+my $hostName = hostname();
+
+if ($hostName =~ /blade\d\d\d/)
+{
+    $queue = 'bc';
+}
+elsif ($hostName eq 'login1')
+{
+    $queue = 'batch';
+}
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions('h'=>\$help, 'v'=>\$viewQueue, 'd'=>\$runDaemon, 'q=s'=>\$queue, 'm=s'=>\$memory, 'enum=s'=>\$enumerate, 't'=>\$test, 'g'=>\$generateLogs)   
+  || (defined($enumerate) && $enumerate!~/(\d+)-(\d+)/ && $1>=$2)
+  || $memory !~ /[1234]gb/i
+  || "$hostName:$queue" !~ /^(blade\d\d\d:(bc|bladejr|long)|login1:batch)$/
+  || ((!$viewQueue && !$runDaemon) && scalar(@ARGV)==0))
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+unless (-d $autoqsubHomeDirectory)
+{
+    print "Creating .autoqsub in $ENV{HOME}\n"; 
+    mkdir("$autoqsubHomeDirectory");
+    print "Creating queue in $autoqsubHomeDirectory\n"; 
+    open(QUEUE, ">$autoqsubHomeDirectory/queue") || die "Cannot open $autoqsubHomeDirectory/queue";
+    close(QUEUE);
+}
+
+if($viewQueue)
+{
+    print "Temporary queue in .autoqsub\n";
+    print "============================\n";
+    system("cat $autoqsubHomeDirectory/queue");
+    print "============================\n";
+    exit(0);
+}
+
+if ($runDaemon)
+{
+    #qstat for tanadria jobs
+    my $qstatOutput = `qstat`;
+    my $maxSubmittedJobs = 10;
+    my $currentSubmittedJobs = 0;
+    
+    my @jobs = split('\n', $qstatOutput);
+    
+    for my $job (@jobs)
+    {
+        if ($job =~ / tanadria /)
+        {
+            my @fields = split(/\s+/, $job);
+
+            if($fields[4] eq 'R')
+            {
+                #print "f4 $fields[4]\n";
+            }
+            elsif ($fields[4] eq 'Q')
+            {
+                #print "f4 $fields[4]\n";
+                
+            }
+            
+            ++$currentSubmittedJobs;
+        }
+    }
+    
+    #print "Available Space: " . ($maxSubmittedJobs-$currentSubmittedJobs) . "\n";
+    
+    #if got space, dequeue queue in ./autoqsub and submit job
+    if ($maxSubmittedJobs>$currentSubmittedJobs)
+    {
+        open(QUEUE, "+<$autoqsubHomeDirectory/queue") || die "Cannot open $autoqsubHomeDirectory/queue";
+        flock(QUEUE, LOCK_EX);
+
+        my $transferQueue = $maxSubmittedJobs-$currentSubmittedJobs;
+        my $remnantQueue = "";
+        while (<QUEUE>)
+        {
+            print;
+            chomp;
+            
+            if($transferQueue>0)
+            {
+                --$transferQueue;
+                system("qsub $autoqsubHomeDirectory/$_");
+            }
+            else
+            {
+                $remnantQueue .= "$_\n";
+            }
+        }
+        
+        seek(QUEUE,0,0);
+        print QUEUE "$remnantQueue";
+        truncate(QUEUE, tell(QUEUE));
+        flock(QUEUE, LOCK_UN);
+        close(QUEUE);
+    }
+    
+    exit(0);
+}
+
+#replaces special characters in the command
+my $mainCommand = shift(@ARGV);
+$mainCommand =~ s/\$/\\\$/g;
+
+if(defined($enumerate))
+{
+    if ($enumerate=~/(\d+)-(\d+)/)
+    {
+        @ARGV = ($1 .. $2);
+    }
+}
+
+#run single command
+if (scalar(@ARGV)==0)
+{
+    push (@ARGV, "");
+}
+
+#iterates through each file
+foreach my $file (@ARGV) 
+{
+    #replaces escape characters in command line argument
+    $file =~ s/&/\\&/g;
+    $file =~ s/ /\\ /g;
+    my ($name, $path, $ext) = fileparse($file, '\..*');
+    my $fileName = "$name$ext";
+    
+    #extract main programme name
+    my @mainCommandTokens = split('\s', $mainCommand, 2);
+    my $mainProgramme = $mainCommandTokens[0];
+    $mainProgramme =~ s/.*\///;
+    
+    my $currentMainCommand = $mainCommand;
+    $currentMainCommand =~ s/%/$file/g;
+    
+    my $logs = $generateLogs ? " 2> $fileName.$mainProgramme.err > $fileName.$mainProgramme.log" : "";
+    my $command = "qsub \"$currentMainCommand$logs\"";
+    
+    if(!$test)
+    {   
+        #insert into queue
+        open(QUEUE, ">>$autoqsubHomeDirectory/queue") || die "Cannot open $autoqsubHomeDirectory/queue";
+        flock(QUEUE, LOCK_EX);
+
+        my $walltime;
+        if($queue eq 'bc')
+        {
+            $walltime = "48:00:00";
+        }
+        elsif ($queue eq 'bladejr')
+        {
+            $walltime = "150:00:00";
+        }
+        elsif ($queue eq 'long')
+        {
+            $walltime = "150:00:00";
+        }
+        elsif ($queue eq 'batch')
+        {
+            $walltime = "24:00:00";
+        }
+
+        #create script
+        my $scriptFile = "$mainProgramme-" . Time::HiRes::gettimeofday() . ".pbs";      
+        open(PBSSCRIPT, ">$autoqsubHomeDirectory/$scriptFile") || die "Cannot open >$autoqsubHomeDirectory/$scriptFile";
+        print PBSSCRIPT <<SCRIPT;
+#!/bin/bash -l 
+#PBS -q $queue
+#PBS -l walltime=$walltime,mem=$memory,nodes=1:ppn=1
+#PBS -m abe
+
+cd $ENV{PWD}
+$currentMainCommand
+SCRIPT
+        close(PBSSCRIPT);
+        
+        print QUEUE "$scriptFile\n";
+        flock(QUEUE, LOCK_UN);
+        
+        close(QUEUE);
+        print "$scriptFile successfully inserted into queue\n";
+    }
+    else
+    {
+        print "$command\n";
+    }
+}

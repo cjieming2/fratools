@@ -1,0 +1,454 @@
+#!/usr/bin/perl 
+
+use warnings;
+use DBI;
+use DBD::mysql;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX qw(ceil floor);
+
+=head1 NAME
+
+fannotatefeatureswithgenes
+
+=head1 SYNOPSIS
+
+ fannotatefeatureswithgenes [options] <mk-file> 
+
+  -h      help
+  -b      build version (hg17|hg18)
+  -w      window size (10000 default) [0,1M]
+ --mask   mask unannotated SNPs (default off)
+  mk-file marker file
+          a)feature-id          
+          b)chromosome
+          c)feature-start
+          d)feature-end
+          
+ example: fannotatefeatureswithgenes pscalare.mk -b hg17 -w 10000
+ 
+ Annotations are based on UCSC tables and GO database.
+  
+ Returns a marker file : gene-annotated-<mk-file>
+ a)feature-id          : feature name
+ b)chromosome          : chromosome where SNP is located
+ c)feature-start       : feature start
+ d)feature-end         : feature end
+ e)known-gene-id       : gene ID in the known/UCSC gene table (UCSC)
+ f)entrez-id           : entrez gene ID (UCSC)
+ g)gene-strand         : strand of gene (UCSC)
+ h)tx-start            : transcription start position (UCSC)
+ i)tx-end              : transcription end position (UCSC)
+ j)gene-symbol         : gene symbol (UCSC)
+ k)gene-description    : gene description (UCSC)
+ l)pathway             : KEGG pathway description (UCSC)
+ m)biological-process  : GO category
+ n)molecular-function  : GO category
+ o)cellular-component  : GO category
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $build = 'hg18';
+my $mkFile;
+my $windowSize = 10000;
+my $maskUnannotatedFeatures = 0;
+my $colNo;
+my $headerProcessed;
+my %FEATURE;
+my %CHROM;
+my %GENE;
+my %label2Column;
+my $annotationCount = 0;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'b=s'=>\$build, 'w=i'=>\$windowSize, 'mask'=>\$maskUnannotatedFeatures) 
+   || $build !~ /(hg17|hg18)/
+   || $windowSize < 0 
+   || $windowSize > 1000000 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$mkFile = $ARGV[0];
+
+print STDERR <<SUMMARY;
+=======
+Options
+=======
+Build: $build
+Window Size: $windowSize
+Mask: $maskUnannotatedFeatures
+=======
+SUMMARY
+
+print STDERR "Reading $mkFile\n";
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+
+while(<MK>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		SEARCH_LABEL: for my $label('feature-id', 'chromosome', 'feature-start', 'feature-end')
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $label)
+				{			
+					$label2Column{$label}=$col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			die "Cannot find '$label' in $mkFile";
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		my $featureID = $fields[$label2Column{'feature-id'}];
+        my $chromosome = $fields[$label2Column{'chromosome'}];
+        $chromosome = $chromosome eq 'XY' ? 'X' : $chromosome;
+        my $featureStart = $fields[$label2Column{'feature-start'}];
+        my $featureEnd = $fields[$label2Column{'feature-end'}];
+        
+        if ($chromosome ne 'n/a' && $featureStart ne 'n/a' && $featureEnd ne 'n/a')
+        {
+            $FEATURE{$featureID}{CHROM} = $chromosome;
+            $FEATURE{$featureID}{START} = $featureStart;
+            $FEATURE{$featureID}{END} = $featureEnd;
+            $FEATURE{$featureID}{ANNOTATED} = 0;
+            $CHROM{$chromosome}{$featureID} = 1;
+	    }
+	    else
+	    {
+	        warn "$featureID has no location";
+	    }
+	}
+}
+close(MK);
+
+my $dbh = DBI->connect(getDBConnectionString(), getDBUser(), getDBUserPassword()) || die "Couldn't connect to database: " . DBI->errstr;
+
+open(FEATURE_ANNOTATED_MK, ">gene-annotated-$mkFile") || die "Cannot open gene-annotated-$mkFile";
+print FEATURE_ANNOTATED_MK "feature-id\tchromosome\tfeature-start\tfeature-end\tknown-gene-id\tentrez-id\tgene-strand\ttx-start\ttx-end\tgene-symbol\tgene-description\tpathway\tbiological-process\tmolecular-function\tcellular-component\n";
+        
+if ($build eq 'hg17')
+{   
+    #populate gene annotation
+    print STDERR "retrieving gene annotation ... ";
+    print STDERR "kegg ... ";
+    $dbh->do(qq{
+        drop table if exists temp_kgid2keggpathway;
+    });
+    $dbh->do(qq{
+        create table temp_kgid2keggpathway 
+            select kgID, description as pathway 
+            from hg17_keggPathway as a left join hg17_keggMapDesc as b 
+            on a.mapID = b.mapID;
+    });
+    $dbh->do(qq{
+        alter table temp_kgid2keggpathway add index(kgID);
+    });
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway;
+    });    
+    $dbh->do(qq{
+        create table temp_gene_pathway 
+            select a.kgID, geneSymbol, description, pathway 
+            from hg17_kgXref as a left join temp_kgid2keggpathway as b 
+            on a.kgID = b.kgID;
+    });
+    print STDERR "GO ... ";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go;
+    });    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go
+            select a.*,  b.biological_process, b.molecular_function, b.cellular_component
+            from temp_gene_pathway as a left join hg17_kgXgo as b 
+            on a.geneSymbol = b.geneSymbol;    
+    });
+    print STDERR "Entrez ID ... ";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go_entrez
+            select a.*, b.value as entrezID
+            from temp_gene_pathway_go as a left join hg17_knownToLocusLink as b 
+            on a.kgID = b.name;    
+    }) || die;
+    print STDERR "aggregating\n";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez_aggregate;
+    });    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go_entrez_aggregate
+            select kgID as gene_id, 
+                   group_concat(distinct entrezID) as entrez_id, 
+                   group_concat(distinct geneSymbol) as gene_symbol, 
+                   group_concat(distinct description) as gene_description, 
+                   group_concat(distinct pathway) as pathway, 
+                   group_concat(distinct biological_process) as biological_process, 
+                   group_concat(distinct molecular_function) as molecular_function, 
+                   group_concat(distinct cellular_component) as cellular_component
+            from temp_gene_pathway_go group by kgID;    
+    });
+    
+    my $queryHandle = $dbh->prepare(qq{
+        select * from temp_gene_pathway_go_aggregate
+    });
+    
+    $queryHandle->execute();    
+    my ($geneID, $entrezID, $geneSymbol, $geneDescription, $pathway, $biologicalProcess, $molecularFunction, $cellularComponent);
+    $queryHandle->bind_columns(\($geneID, $entrezID, $geneSymbol, $geneDescription, $pathway, $biologicalProcess, $molecularFunction, $cellularComponent));
+    while (my @row = $queryHandle->fetchrow_array())
+    {
+        $GENE{$geneID}{GS} = !defined($geneSymbol) ? 'n/a' : $geneSymbol;
+        $GENE{$geneID}{ENTREZ_ID} = !defined($entrezID) ? 'n/a' : $entrezID;
+        $GENE{$geneID}{GD} = !defined($geneDescription) ? 'n/a' : $geneDescription;
+        $GENE{$geneID}{PW} = !defined($pathway) ? 'n/a' : $pathway;
+        $GENE{$geneID}{BP} = !defined($biologicalProcess) ? 'n/a' : $biologicalProcess;
+        $GENE{$geneID}{MF} = !defined($molecularFunction) ? 'n/a' : $molecularFunction;
+        $GENE{$geneID}{CC} = !defined($cellularComponent) ? 'n/a' : $cellularComponent;
+    }        
+        
+    $dbh->do(qq{
+        drop table if exists temp_kgid2keggpathway;
+    });
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway;
+    });    
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go;
+    });
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez;
+    });  
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez_aggregate;
+    }); 
+    $queryHandle->finish();
+          
+    for my $chromosome (sort {if("$a$b"=~/^\d+$/){$a <=> $b}else{$a cmp $b}} keys(%CHROM))
+    {
+        print STDERR "Processing chromosome $chromosome ... ";
+            
+        print STDERR "annotating features with genes ... ";
+        $queryHandle = $dbh->prepare(qq{
+            select name, txstart, txend, strand from hg17_knownGene where chrom = 'chr$chromosome'
+        });
+        $queryHandle->execute();
+        my ($name, $txstart, $txend, $strand);
+        $queryHandle->bind_columns(\$name, \$txstart, \$txend, \$strand);
+        
+        my $chromosomeAnnotationCount = 0;
+        while (my @row = $queryHandle->fetchrow_array())
+        {           
+            ++$txstart;
+            my $leftWindowStart = $txstart - $windowSize; #it's ok to be negative
+            my $rightWindowEnd = $txend + $windowSize;
+
+            my $featureStart;
+            my $featureEnd;
+            
+            for my $feature (keys(%{$CHROM{$chromosome}}))
+            {
+                $featureStart = $FEATURE{$feature}{START};
+                $featureEnd = $FEATURE{$feature}{END};
+                
+                if ($featureStart<=$rightWindowEnd && $featureEnd>=$leftWindowStart)
+                {
+                    print FEATURE_ANNOTATED_MK "$feature\t$chromosome\t$featureStart\t$featureEnd\t$name\t$GENE{$name}{ENTREZ_ID}\t$strand\t$txstart\t$txend";
+                    print FEATURE_ANNOTATED_MK "\t$GENE{$name}{GS}\t$GENE{$name}{GD}\t$GENE{$name}{PW}\t$GENE{$name}{BP}\t$GENE{$name}{MF}\t$GENE{$name}{CC}\n";
+                    $FEATURE{$feature}{ANNOTATED} = 1;
+                    ++$chromosomeAnnotationCount;
+                }
+            }
+        }
+
+        $queryHandle->finish();
+        $annotationCount += $chromosomeAnnotationCount;
+        print STDERR "$chromosomeAnnotationCount annotations for " . scalar(keys(%{$CHROM{$chromosome}})) . " features\n";
+    } 
+}
+elsif ($build eq 'hg18')
+{
+    #populate gene annotation
+    print STDERR "retrieving gene annotation ... ";
+    print STDERR "kegg ... ";
+    $dbh->do(qq{
+        drop table if exists temp_kgid2keggpathway;
+    }) || die;
+    $dbh->do(qq{
+        create table temp_kgid2keggpathway 
+            select kgID, description as pathway 
+            from hg18_keggPathway as a left join hg18_keggMapDesc as b 
+            on a.mapID = b.mapID;
+    }) || die;
+    $dbh->do(qq{
+        alter table temp_kgid2keggpathway add index(kgID);
+    }) || die;
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway 
+            select a.kgID, geneSymbol, description, pathway 
+            from hg18_kgXref as a left join temp_kgid2keggpathway as b 
+            on a.kgID = b.kgID;
+    }) || die;
+    print STDERR "GO ... ";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go
+            select a.*,  b.biological_process, b.molecular_function, b.cellular_component
+            from temp_gene_pathway as a left join hg17_kgXgo as b 
+            on a.geneSymbol = b.geneSymbol;    
+    }) || die;
+    print STDERR "Entrez ID ... ";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go_entrez
+            select a.*, b.value as entrezID
+            from temp_gene_pathway_go as a left join hg18_knownToLocusLink as b 
+            on a.kgID = b.name;    
+    }) || die;
+    print STDERR "aggregating\n";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez_aggregate;
+    });    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go_entrez_aggregate
+            select kgID as gene_id, 
+                   group_concat(distinct entrezID) as entrezID,
+                   group_concat(distinct geneSymbol) as gene_symbol, 
+                   group_concat(distinct description) as gene_description, 
+                   group_concat(distinct pathway) as pathway, 
+                   group_concat(distinct biological_process) as biological_process, 
+                   group_concat(distinct molecular_function) as molecular_function, 
+                   group_concat(distinct cellular_component) as cellular_component
+            from temp_gene_pathway_go_entrez group by kgID;    
+    }) || die;
+    
+    my $queryHandle = $dbh->prepare(qq{
+        select * from temp_gene_pathway_go_entrez_aggregate
+    });
+    
+    $queryHandle->execute();    
+    my ($geneID, $entrezID, $geneSymbol, $geneDescription, $pathway, $biologicalProcess, $molecularFunction, $cellularComponent);
+    $queryHandle->bind_columns(\($geneID, $entrezID, $geneSymbol, $geneDescription, $pathway, $biologicalProcess, $molecularFunction, $cellularComponent));
+    while (my @row = $queryHandle->fetchrow_array())
+    {
+        $GENE{$geneID}{GS} = !defined($geneSymbol) ? 'n/a' : $geneSymbol;
+        $GENE{$geneID}{ENTREZ_ID} = !defined($entrezID) ? 'n/a' : $entrezID;
+        $GENE{$geneID}{GD} = !defined($geneDescription) ? 'n/a' : $geneDescription;
+        $GENE{$geneID}{PW} = !defined($pathway) ? 'n/a' : $pathway;
+        $GENE{$geneID}{BP} = !defined($biologicalProcess) ? 'n/a' : $biologicalProcess;
+        $GENE{$geneID}{MF} = !defined($molecularFunction) ? 'n/a' : $molecularFunction;
+        $GENE{$geneID}{CC} = !defined($cellularComponent) ? 'n/a' : $cellularComponent;
+    }
+                
+    $dbh->do(qq{
+        drop table if exists temp_kgid2keggpathway;
+    }) || die;
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway;
+    }) || die;    
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go;
+    }) || die;    
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez;
+    }) || die;
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez_aggregate;
+    }) || die;    
+    $queryHandle->finish();
+          
+    for my $chromosome (sort {if("$a$b"=~/^\d+$/){$a <=> $b}else{$a cmp $b}} keys(%CHROM))
+    {
+        print STDERR "Processing chromosome $chromosome ... ";
+            
+        print STDERR "annotating features with genes ... ";
+        $queryHandle = $dbh->prepare(qq{
+            select name, txstart, txend, strand from hg18_knownGene where chrom = 'chr$chromosome'
+        });
+        $queryHandle->execute();
+        my ($name, $txstart, $txend, $strand);
+        $queryHandle->bind_columns(\$name, \$txstart, \$txend, \$strand);
+        
+        my $chromosomeAnnotationCount = 0;
+        while (my @row = $queryHandle->fetchrow_array())
+        {           
+            ++$txstart;
+            my $leftWindowStart = $txstart - $windowSize; #it's ok to be negative
+            my $rightWindowEnd = $txend + $windowSize;
+
+            my $featureStart;
+            my $featureEnd;
+            
+            for my $feature (keys(%{$CHROM{$chromosome}}))
+            {
+                $featureStart = $FEATURE{$feature}{START};
+                $featureEnd = $FEATURE{$feature}{END};
+                
+                if ($featureStart<=$rightWindowEnd && $featureEnd>=$leftWindowStart)
+                {                     
+                    print FEATURE_ANNOTATED_MK "$feature\t$chromosome\t$featureStart\t$featureEnd\t$name\t$GENE{$name}{ENTREZ_ID}\t$strand\t$txstart\t$txend";
+                    print FEATURE_ANNOTATED_MK "\t$GENE{$name}{GS}\t$GENE{$name}{GD}\t$GENE{$name}{PW}\t$GENE{$name}{BP}\t$GENE{$name}{MF}\t$GENE{$name}{CC}\n";
+                    $FEATURE{$feature}{ANNOTATED} = 1;
+                    ++$chromosomeAnnotationCount;
+                }
+            }
+        }
+
+        $queryHandle->finish();
+        $annotationCount += $chromosomeAnnotationCount;
+        print STDERR "$chromosomeAnnotationCount annotations for " . scalar(keys(%{$CHROM{$chromosome}})) . " features\n";
+    } 
+}
+
+if(!$maskUnannotatedFeatures)
+{
+    for my $featureID (keys(%FEATURE))
+    {
+        if (!$FEATURE{$featureID}{ANNOTATED})
+        {
+            print FEATURE_ANNOTATED_MK "$featureID\t$FEATURE{$featureID}{CHROM}\t$FEATURE{$featureID}{START}\t$FEATURE{$featureID}{END}" . "\tn/a" x 11 . "\n";
+        }
+    }
+}
+
+close(FEATURE_ANNOTATED_MK);  
+$dbh->disconnect();

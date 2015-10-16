@@ -1,0 +1,130 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use fralib;
+use POSIX qw(ceil floor);
+use File::Path;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+peek - prints the top left hand portion of a tsv
+
+=head1 SYNOPSIS
+
+    usage: peek <filename>	
+	
+    -h displays this help
+    -d sets the character delimiter, default is tab
+       this must be of length 1.
+    	
+    example: peek pscalare.txt
+             peek -d "," pscalare.csv
+             peek -d , pscalare.csv
+    
+    Peeks at the first 10 rows and first 10 columns of a delimited file.
+    Reads from STDIN too.  In both cases, output is STDOUT.
+    
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $delimiter = "\t";
+my $isStdin;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'd=s'=>\$delimiter) 
+   || length($delimiter)!=1 && $delimiter!~/^\\t/|| $help)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$delimiter = "\t" if $delimiter eq '\t';
+
+#STDIN redirection
+if (scalar(@ARGV)==0)
+{
+	*IN = *STDIN;
+	push(@ARGV, "STDIN");
+	$isStdin = 1;
+}
+    
+for my $tableFile (@ARGV)
+{    
+    #STDIN redirection
+    if ($isStdin)
+    {
+    	*IN = *STDIN;
+    }
+    else
+    {
+        if (-e $tableFile)
+        {
+			if ($tableFile =~ /\.gz$/)
+    	    {
+				open(IN, "gzip -dc $tableFile |") || die "Cannot open $tableFile\n";	
+			}
+			else
+			{
+				open(IN, $tableFile) || die "Cannot open $tableFile\n";
+	    	}    
+		}
+        else
+        {
+            next;
+        }
+    }   
+    
+    if(scalar(@ARGV)>1 && !$isStdin)
+    {
+        print "==> $tableFile <==\n";
+    }
+    
+	my $lineNo = 0;
+    while(<IN>)
+    {
+        last if $lineNo > 10;
+       
+		next if /^##/;
+ 
+        s/\r?\n?$//;
+        my @fields = split("$delimiter");
+        
+        for (my $col=0; $col<=$#fields && $col<10; $col++)
+        {
+            print "$fields[$col]";
+            
+            if ($col==$#fields || $col==9)
+            {
+                print "\n";
+            }
+            else
+            {
+                print "$delimiter";
+            }
+        }
+
+		++$lineNo;
+    }
+    
+    close(IN);
+    
+    if(scalar(@ARGV)>1 && !$isStdin)
+    {
+        print "\n";
+    }
+}

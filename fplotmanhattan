@@ -1,0 +1,165 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Cwd;
+use Cwd 'abs_path';
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+ fplotmanhattan 
+
+=head1 SYNOPSIS
+
+ fplotmanhattan [options] file
+
+  -o                output file name
+                    Default output file is manhattan-plot-<file>.pdf
+  -t                Title
+  mk-file           marker file
+                    a)snp-id
+                    b)chromosome
+                    c)position
+                    d)p-value
+
+ example: fplotmanhattan -t "Plot of ARIC" pscalare.txt
+
+ Makes a manhattan plot of genome wide association statistics.
+ 
+=head1 DESCRIPTION
+
+=cut
+
+## Global variables
+my $outputFileName;
+my $mkFile;
+my $inputDir;
+my %label2Column;
+my $title = "Manhattan Plot";
+
+## Option variables
+my $help;
+
+## Main Script
+# initialize options
+Getopt::Long::Configure('bundling');
+if(!GetOptions ('h'=>\$help,
+                't=s'=>\$title) 
+    || scalar(@ARGV)!=1)  
+{
+    if ($help)  
+    {
+        pod2usage(-verbose => 2);
+    }
+    else  
+    {
+        pod2usage(1);
+    }
+}
+
+$mkFile = $ARGV[0];
+
+if(!defined($outputFileName))  
+{
+    my($filename, $directories, $suffix) = fileparse($mkFile, '\..*');
+    $outputFileName = "manhattan-plot-$filename.pdf";
+    $inputDir = abs_path($directories);
+}
+
+$outputFileName .= '.pdf' unless($outputFileName =~ /\.pdf$/i);
+
+# check file correctness
+open(MK, "< $mkFile") or die "Can't open mk file - $mkFile :: $! \n";
+my $header = <MK>;
+chomp($header);
+my @fields = split('\t', $header);
+SEARCH_LABEL: for my $label ('snp-id', 'chromosome', 'position', 'p-value')
+{
+    for my $col (0 .. $#fields)
+    {
+        if ($fields[$col] eq $label)
+        {           
+            $label2Column{$label}=$col;
+            next SEARCH_LABEL;
+        }
+    }
+
+        die "Cannot find '$label' in $mkFile";
+}
+close MK;
+
+# Load marker file into R to generate plot
+my $currDir = cwd();
+open(oFILE, "> $currDir/R.input") or die "Can't create temp R input file :: $! \n";
+
+print oFILE <<RSCRIPT;
+genome.data = read.table("$mkFile", header=T)
+
+minimum = rep(0,27)
+maximum = rep(0,27)
+offset = rep(0,27)
+#Manhattan Plot
+for (chrom in seq(1:26))
+{
+	minimum[chrom] = min(genome.data\$position[genome.data\$chromosome==chrom])
+	maximum[chrom] = max(genome.data\$position[genome.data\$chromosome==chrom])
+	
+	if(is.infinite(minimum[chrom]))
+	{	
+		minimum[chrom]= 0
+		maximum[chrom]= 0
+	}
+
+	if (chrom==1)
+	{
+		offset[chrom] = 0 - minimum[chrom]
+	}
+	else
+	{
+		offset[chrom] = offset[chrom-1] + maximum[chrom-1] - minimum[chrom]
+	}
+}
+
+accent = c("#7FC97F", "#BEAED4", "#FDC086", "#FFFF99", "#386CB0", "#F0027F", "#BF5B17")
+chromColors = c(accent, accent, accent, accent[1:5])
+positions = genome.data\$position + offset[genome.data\$chromosome]
+
+bitmap(file="$currDir/$outputFileName", type = "png256", height = 6, width=6, res=72) 
+plot(positions, -log(genome.data\$p.value), 
+     col=chromColors[genome.data\$chromosome],
+     bg=chromColors[genome.data\$chromosome], 
+     pch=21,
+     main = "$title",
+     ylab = "-log(p-values)",
+     xlab = "chromosomes",
+     axes = F)
+axis(1, labels = FALSE)
+axis(2)
+box()
+dev.off();
+q();
+RSCRIPT
+
+close oFILE;
+
+system("R --vanilla <$currDir/R.input &>$currDir/R.log") == 0 || die "Plotting failed, please check R.input and R.log";
+ 
+if ($? == -1) 
+{
+    warn "failed to execute: $!\n";
+}
+elsif 
+($? & 127) 
+{
+    printf STDERR "child died with signal %d, %s coredump\n", ($? & 127),  ($? & 128) ? 'with' : 'without';
+}
+else 
+{
+    unlink("$currDir/R.input");
+    unlink("$currDir/R.log");
+}
+
+__END__

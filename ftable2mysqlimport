@@ -1,0 +1,128 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Cwd;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+ftable2mysqlimport
+
+=head1 SYNOPSIS
+
+ftable2mysqlimport [options] <table-file>
+  
+ -h          help
+ table-file  data file with headers
+  
+ example: ftable2mysqlimport pscalare.sa
+ 
+ Generates <table-file>.txt and <table-file>.sql that allows for import into mySQL.
+ 
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $tableFile;
+my $sqlFile;
+my $dataFile;
+my $colNo;
+my $headerProcessed;
+my @labels;
+my @maxFieldLength;
+my $addRankFieldName;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help)
+   || scalar(@ARGV) != 1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$tableFile = $ARGV[0];
+
+my ($name, $path, $ext) = fileparse($tableFile, '\..*');
+$name=~s/-/_/g;
+$dataFile = "$name$ext.txt";
+open(DATA, ">$dataFile") || die "Cannot open $dataFile";
+
+open(TABLE, $tableFile) || die "Cannot open $tableFile";
+$headerProcessed = 0;
+while(<TABLE>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+	
+		for my $col (0 .. $#fields)
+		{
+			push(@labels, $fields[$col]);
+			push(@maxFieldLength, 1);
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+        
+        my $fieldLength;
+        for my $col (0 .. $#fields-1)
+		{
+			if ($fields[$col] eq 'n/a')
+			{
+				$fields[$col] = '\\N';
+			}
+		    $fieldLength = length($fields[$col]);
+		    $maxFieldLength[$col] = max($maxFieldLength[$col], $fieldLength);
+		    print DATA "$fields[$col]\t";
+		}
+		
+		if ($fields[$#fields] eq 'n/a')
+		{
+			$fields[$#fields] = '\\N';
+		}
+	    $fieldLength = length($fields[$#fields]);
+	    $maxFieldLength[$#fields] = max($maxFieldLength[$#fields], $fieldLength);
+	    print DATA "$fields[$#fields]\n";
+	}
+}
+close(TABLE);
+close(DATA);
+
+$sqlFile = "$name$ext.sql";
+open(SQL, ">$sqlFile") || die "Cannot open $sqlFile\n";
+
+print SQL "drop table if exists $name;\n";
+print SQL "create table $name (\n";
+
+for my $col (0 .. $#labels-1)
+{
+    $labels[$col] =~ s/-/_/g;
+    #print SQL "\t`$labels[$col]` varchar($maxFieldLength[$col]),\n";    
+	print SQL "\t`$labels[$col]` double,\n";    
+}
+$labels[$#labels] =~ s/-/_/g;
+#print SQL "\t`$labels[$#labels]` varchar($maxFieldLength[$#labels]));\n";
+print SQL "\t`$labels[$#labels]` double);\n";
+
+close(SQL);

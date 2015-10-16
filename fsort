@@ -1,0 +1,172 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Fcntl;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+fsort
+
+=head1 SYNOPSIS
+
+ fsort [option] <gt-file>	
+	
+ -h help
+ -o output file
+ -c sort columns (default is sort rows)	
+ -n sort numerically	
+	
+ example: fsort -r pscalare.gt
+	
+ Sorts a genotype/table file by row or by column.
+	       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $sortCol;
+my $numericalSort;
+my $outFile;
+my $headerProcessed;
+my $help;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'c'=>\$sortCol, 'n'=>\$numericalSort, 'o=s'=>\$outFile) 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my $gtFile = $ARGV[0];
+
+if(!isGt($gtFile))
+{
+	warn "$gtFile is not a gt file";
+}
+
+if(!defined($outFile))
+{
+	my ($name, $path, $ext) = fileparse($gtFile, '\..*');
+	$outFile = "sorted-$name$ext";
+}
+
+if ($sortCol)
+{
+	open(GT, $gtFile) || die "Cannot open $gtFile";
+	$headerProcessed = 0;
+	my $colNo;
+	my @sortedFields;
+	my %element2col;
+	
+	while (<GT>)
+	{
+		s/\r?\n?$//; 
+		
+		if (!$headerProcessed)
+		{
+			$colNo = s/\t/\t/g + 1;
+			my @fields = split("\t", $_, $colNo);
+						
+			open(OUT, ">$outFile") || die "Cannot open $outFile\n";
+			
+			map {$element2col{$fields[$_]} = $_;} (0 .. $#fields);
+			
+			print OUT "$fields[0]";
+			
+			shift(@fields);
+			
+			if($numericalSort)
+			{
+				@sortedFields = sort {$a<=>$b} @fields;
+			}
+			else
+			{
+				@sortedFields = sort(@fields);
+			}
+			
+			map {print OUT "\t$_"} @sortedFields;
+			
+			print OUT "\n";
+			
+			$headerProcessed = 1;
+		}
+		else
+		{
+			my @fields = split("\t", $_, $colNo);
+		
+			print OUT "$fields[0]";
+			map {print OUT "\t$fields[$element2col{$_}]"} @sortedFields;
+			print OUT "\n";
+		}
+	}
+	
+	close(OUT);
+}
+else
+{	
+	open(GT, $gtFile) || die "Cannot open $gtFile\n";
+	my @sortedRowElements;
+	my %ROW_ELEMENTS;
+	my %element2row;
+	my $fpos = 0;
+	
+	#read in the row elements
+	while (<GT>)
+	{
+		s/\r?\n?$//; 
+		
+		if ($.==1)
+		{
+			my @fields = split("\t", $_, 2);
+						
+			open(OUT, ">$outFile") || die "Cannot open $outFile\n";
+			print OUT "$_\n";
+			
+			$fpos += length($_) + 1;
+		}
+		else
+		{
+			my @fields = split("\t", $_, 2);
+		
+			$ROW_ELEMENTS{$fields[0]} = $fpos . "," .length($_);	
+			$fpos += length($_) + 1;		
+		}
+	}
+
+	#sort rows
+	if($numericalSort)
+	{
+		@sortedRowElements = sort {$a<=>$b} keys(%ROW_ELEMENTS);
+	}
+	else
+	{
+		@sortedRowElements = sort(keys(%ROW_ELEMENTS));
+	}
+			
+	#reorder
+	for (@sortedRowElements)
+	{
+		(my $rowPos, my $rowLength) = split(",", $ROW_ELEMENTS{$_},2);
+		
+		seek(GT, $rowPos, 0) || die "Seeking: $!\n";
+		read(GT, $_, $rowLength) == $rowLength || die "Reading: $!\n";
+		print OUT "$_\n";
+	}
+	
+	close(OUT);
+}

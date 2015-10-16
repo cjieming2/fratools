@@ -1,0 +1,704 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+fselect
+
+=head1 SYNOPSIS
+
+ fselect [options] <syntax - see example>
+
+  -h       help
+  
+  example: fselect a.name, b.ethnicity from pscalare.mk, paltum.mk where a.name = b.name delim tab
+           fselect a.name, b.ethnicity from pscalare.mk left join paltum.mk where a.name = b.name delim comma
+           fselect a.name, b.ethnicity from pscalare.mk outer join paltum.mk where a.name = b.name delim space
+           fselect a.name from pscalare.mk where a.name = innesi delim tab
+           fselect a.+ from pscalare.mk where a.name = axelrodi delim tab
+           
+  A rudimentary query system that works on tab delimited annotation files.
+  Selects any number of fields on a inner join between exactly 2 files based on exactly 1 condition.
+  Note that this is a true join, so you can get multiple matches if File B matching column has repeated values.
+  This differs from apt-tsv-join where values in the joining fields are required to be distinct.
+
+  TODO:
+  1)support multiple conditions
+  2)aggregate functions?
+  
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my %fileAFields;
+my %fileBFields;
+my @fileAFields;
+my @fileBFields;
+my %labelA2col;
+my %labelB2col;
+my @fileASelectedFields;
+my @fileBSelectedFields;
+my @conditionalFieldL;
+my @conditionalFieldR;
+my $headerProcessed;
+my $fileAColNo;
+my $fileBColNo;
+my $fileAField;
+my $fileAFieldValue;
+my $fileBField;
+my $filePosition;
+my $joinType;
+my $delim = "\t";
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help) || scalar(@ARGV)==0)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+#parse query
+my $sfw = !defined(@ARGV) ? die "no query" : join(' ', @ARGV);
+
+print STDERR "SFW : fselect $sfw\n";
+
+if($sfw =~ /(.+)from(.+)where(.+)delim(.+)/)
+{
+    my $selectedFields = trim($1);
+    my $files = trim($2);
+    my $conditions = trim($3);
+   	my $delimiter = trim($4);
+   	  			
+	if($delimiter eq "tab")
+	{
+		$delim = "\t";
+		print STDERR "Delimiter : tab\n";
+	}
+	elsif ($delimiter eq "comma")
+	{
+		$delim = ",";
+		print STDERR "Delimiter : comma\n";
+	}
+	elsif ($delimiter eq "space")
+	{
+		$delim = " ";
+		print STDERR "Delimiter : space\n";
+	}
+	else
+	{
+		die "$delimiter not recognized";
+	}
+    	
+    #detects 2 files, is a join 
+    if($files=~/(.+)(,|left join|outer join)(.+)/)
+    {
+        my $fileA = trim($1);
+        my $fileB = trim($3);
+    
+        if($2 eq ',')
+        {
+            $joinType = "inner join";
+        }
+        elsif ($2 eq 'left join')
+        {
+            $joinType = "left join";
+        }
+        elsif ($2 eq 'outer join')
+        {
+            $joinType = "outer join";
+        }
+                
+        open(A, $fileA) || die "Cannot open $fileA";
+        open(B, $fileB) || die "Cannot open $fileB"; 
+    
+        while (<A>)
+        {
+            s/\r?\n?$//;
+            
+            $fileAColNo = s/$delim/$delim/g + 1;
+            my @fields = split($delim, $_, $fileAColNo);
+            
+            for my $col (0 .. $#fields)
+            {
+                my $label = $fields[$col];
+                
+                if(!exists($fileAFields{$label}))
+                {
+                    $fileAFields{$label}++;
+                    push(@fileAFields, $label);
+                }
+                else
+                {
+                    die "\'$label\' field not unique in $fileA";
+                }
+                
+                $labelA2col{$label} = $col;
+            }
+            
+            seek(A, 0, 0);
+            
+            last;
+        }
+
+        while (<B>)
+        {
+            s/\r?\n?$//;
+                
+            $fileBColNo = s/$delim/$delim/g + 1;
+            my @fields = split($delim, $_, $fileBColNo);
+            
+            for my $col (0 .. $#fields)
+            {
+                my $label = $fields[$col];
+                
+                if(!exists($fileBFields{$label}))
+                {
+                    $fileBFields{$label}++;
+                    push(@fileBFields, $label);
+                }
+                else
+                {
+                    die "\'$label\' field not unique in $fileB";
+                }
+                
+                $labelB2col{$label} = $col;
+            }
+            
+            seek(B, 0, 0);
+            
+            last;
+        }
+        
+        print STDERR "File A : $fileA\n";
+        print STDERR "File B : $fileB\n";
+        print STDERR "Join type : $joinType\n";
+        
+        my $selectedFieldCount = 0;
+        #check selected fields
+        for my $field (split(",", $selectedFields))
+        {
+            $field = trim($field);
+        
+            if ($field=~/([ab])\.([-\w]+|\+)/)
+            {
+                my $referenceFile = $1;
+                my $field = $2;
+                
+                if ($referenceFile eq 'a')
+                {
+                    if ($field eq '+')
+                    {
+                        for my $label (@fileAFields)
+                        {
+                            push(@fileASelectedFields, $label);
+                            print STDERR "Selected Fields : $referenceFile.$label\n";
+                            $selectedFieldCount++;
+                        }
+                    }
+                    elsif(exists($fileAFields{$field}))
+                    {
+                        push(@fileASelectedFields, $field);
+                        print STDERR "Selected Fields : $referenceFile.$field\n";
+                        $selectedFieldCount++;
+                    }
+                    else
+                    {
+                        die "$field does not exist in $fileA";
+                    }
+                }
+                elsif ($referenceFile eq 'b')
+                {
+                    if ($field eq '+')
+                    {
+                        for my $label (@fileBFields)
+                        {
+                            push(@fileBSelectedFields, $label);
+                            print STDERR "Selected Fields : $referenceFile.$label\n";
+                            $selectedFieldCount++;
+                        }
+                    }
+                    elsif(exists($fileBFields{$field}))
+                    {
+                        push(@fileBSelectedFields, $field);
+                        print STDERR "Selected Fields : $referenceFile.$field\n";
+                        $selectedFieldCount++;
+                    }
+                    else
+                    {
+                        die "$field does not exist in $fileA";
+                    }
+                }
+            }
+            else
+            {
+                die "selected fields problem: $field";
+            }
+        }
+        
+        if ($selectedFieldCount == 0)
+        {
+            die "No selected fields";
+        }
+        
+        #check fields in "where" portion of query
+        #support ONLY 1 conditional now.
+        #enforces form: "a.x = b.y"                     
+        if ($conditions=~/^\s*a\.([-\w]+)\s*=\s*b\.([-\w]+)\s*$/)
+        {
+            $fileAField = $1;
+            $fileBField = $2;
+            
+            print STDERR "File A Field : $fileAField\n";
+            print STDERR "File B Field : $fileBField\n";
+                            
+            if (!exists($fileAFields{$fileAField}))
+            {
+                die "$fileAField does not exist in $fileA";
+            }
+            
+            if (!exists($fileBFields{$fileBField}))
+            {
+                die "$fileBField does not exist in $fileB";
+            }
+        }
+        else
+        {
+            die "conditional fields problem: $conditions";
+        }
+        
+        ############################
+        #START THE REAL WORK HERE!!!
+        ############################
+        #index B based on field of interest
+        $headerProcessed = 0;
+        $filePosition = 0;
+        my %fieldAValues;
+        my %fieldBValues;
+        my $fieldBCol = $labelB2col{$fileBField};
+        
+        while (<B>)
+        {
+            s/\r?\n?$//;
+            
+            if(!$headerProcessed)
+            {
+                $headerProcessed = 1;
+            }
+            else
+            {
+                my @fields = split($delim, $_, $fileBColNo);
+                
+                if(!exists($fieldBValues{$fields[$fieldBCol]}))
+                {
+                    $fieldBValues{$fields[$fieldBCol]}[0] = $filePosition;
+                }
+                else
+                {
+                    push(@{$fieldBValues{$fields[$fieldBCol]}}, $filePosition);
+                }
+            }
+            
+            $filePosition = tell(B);
+        }
+        
+        print STDERR "Generating select join\n";
+        print STDERR "======================\n";
+        
+        $headerProcessed = 0;
+        $filePosition = 0;
+        seek(A,0,0);
+        my $fieldACol = $labelA2col{$fileAField};
+        
+        while (<A>)
+        {
+            s/\r?\n?$//;
+            
+            if(!$headerProcessed)
+            {
+                my @fileAFields = split($delim, $_, $fileAColNo);
+                my $firstColumn = 1;
+                
+                #print desired fields from file A
+                for my $label (@fileASelectedFields)
+                {
+                    if ($firstColumn)
+                    {
+                        $firstColumn = 0;
+                    }
+                    else
+                    {
+                        print "\t";
+                    }
+
+                    print "$fileAFields[$labelA2col{$label}]";
+                    
+                }
+                
+                seek(B, 0, 0);
+                my $fields = <B>;
+                $fields =~ s/\r?\n?$//;
+                
+                my @fileBFields = split($delim, $fields, $fileBColNo);
+                
+                #print desired fields from file B
+                for my $label (@fileBSelectedFields)
+                {
+                    if ($firstColumn)
+                    {
+                        $firstColumn = 0;
+                    }
+                    else
+                    {
+                        print "\t";
+                    }
+                    
+                    print "$fileBFields[$labelB2col{$label}]";
+                }
+                
+                print "\n";
+                    
+                $headerProcessed = 1;
+
+            }
+            else
+            {
+                my @fileAFields = split($delim, $_, $fileAColNo);
+                
+                my $fieldAValue = $fileAFields[$fieldACol];
+                
+                $fieldAValues{$fieldAValue} = $filePosition;
+                
+                if(exists($fieldBValues{$fieldAValue}))
+                {
+                    #search for match in B
+                    for my $fileBPosition (@{$fieldBValues{$fieldAValue}})
+                    {
+                        #print desired fields from file A
+                        my $firstColumn = 1;
+                        for my $label (@fileASelectedFields)
+                        {
+                            if ($firstColumn)
+                            {
+                                $firstColumn = 0;
+                            }
+                            else
+                            {
+                                print "\t";
+                            }
+        
+                            print "$fileAFields[$labelA2col{$label}]";
+                        }
+                        
+                        #print desired fields from file B
+                        seek(B, $fileBPosition, 0);
+                        my $fields = <B>;
+                        $fields =~ s/\r?\n?$//;
+                        
+                        my @fileBFields = split($delim, $fields, $fileBColNo);
+                        
+                        #print desired fields from file B
+                        for my $label (@fileBSelectedFields)
+                        {
+                            if ($firstColumn)
+                            {
+                                $firstColumn = 0;
+                            }
+                            else
+                            {
+                                print "\t";
+                            }
+                            
+                            print "$fileBFields[$labelB2col{$label}]";
+                        }
+                        
+                        print "\n";
+                    }
+                }
+                elsif ($joinType=~/(left join|outer join)/)
+                {
+                    #print desired fields from file A
+                    my $firstColumn = 1;
+                    for my $label (@fileASelectedFields)
+                    {
+                        if ($firstColumn)
+                        {
+                            $firstColumn = 0;
+                        }
+                        else
+                        {
+                            print "\t";
+                        }
+    
+                        print "$fileAFields[$labelA2col{$label}]";
+                    }
+                        
+                    #print desired fields from file B
+                    for my $label (@fileBSelectedFields)
+                    {                       
+                        print "\tn\/a";
+                    }
+                        
+                    print "\n";
+                }
+            }
+            
+            $filePosition = tell(A);
+        }
+        
+        #perform right join
+        if ($joinType eq 'outer join')
+        {
+            #remove occurences of file A key in file B
+            #this removal has to be done after the initial join as the join is a cartesian product
+            for my $fieldAValue (keys(%fieldAValues))
+            {               
+                if (exists($fieldBValues{$fieldAValue}))
+                {
+                    delete($fieldBValues{$fieldAValue});
+                }
+            }
+            
+            #print out n/a for file A and selected fields in file B.
+            for my $fieldBValue (keys(%fieldBValues))
+            {   
+                #search for match in B
+                for my $fileBPosition (@{$fieldBValues{$fieldBValue}})
+                {
+                    #print desired fields from file B
+                    seek(B, $fileBPosition, 0);
+                    my $fields = <B>;
+                    $fields =~ s/\r?\n?$//;
+                    my @fileBFields = split($delim, $fields, $fileBColNo);
+    
+                    my $firstColumn = 1;
+                    for my $label (@fileASelectedFields)
+                    {
+                        if ($firstColumn)
+                        {
+                            $firstColumn = 0;
+                        }
+                        else
+                        {
+                            print "\t";
+                        }
+        
+                        if ($label eq $fileAField)
+                        {
+                            print "$fileBFields[$labelB2col{$fileBField}]";
+                        }
+                        else
+                        {
+                            print "n\/a";   
+                        }
+                    }
+                    
+                    for my $label (@fileBSelectedFields)
+                    {                       
+                        print "\t$fileBFields[$labelB2col{$label}]";
+                    }
+                    
+                    print "\n";
+                }
+            }
+        }
+        
+        close(A);
+        close(B);
+    }
+    #detects 1 file, not a join
+    elsif($files=~/(.+)/)
+    {
+        my $fileA = trim($1);
+            
+        open(A, $fileA) || die "Cannot open $fileA";
+    
+        while (<A>)
+        {
+            s/\r?\n?$//;
+            
+            $fileAColNo = s/$delim/$delim/g + 1;
+            my @fields = split($delim, $_, $fileAColNo);
+            
+            for my $col (0 .. $#fields)
+            {
+                my $label = $fields[$col];
+                
+                if(!exists($fileAFields{$label}))
+                {
+                    $fileAFields{$label}++;
+                    push(@fileAFields, $label);
+                }
+                else
+                {
+                    die "\'$label\' field not unique in $fileA";
+                }
+                
+                $labelA2col{$label} = $col;
+            }
+            
+            seek(A, 0, 0);
+            
+            last;
+        }
+    
+        print STDERR "File A : $fileA\n";
+        
+        my $selectedFieldCount = 0;
+        #check selected fields
+        for my $field (split(",", $selectedFields))
+        {
+            $field = trim($field);
+        
+            if ($field=~/a\.([-\w]+|\+)/)
+            {
+                my $field = $1;         
+
+                if ($field eq '+')
+                {
+                    for my $label (@fileAFields)
+                    {
+                        push(@fileASelectedFields, $label);
+                        print STDERR "Selected Fields : $label\n";
+                        $selectedFieldCount++;
+                    }
+                }
+                elsif(exists($fileAFields{$field}))
+                {
+                    push(@fileASelectedFields, $field);
+                    print STDERR "Selected Fields : $field\n";
+                    $selectedFieldCount++;
+                }
+                else
+                {
+                    die "$field does not exist in $fileA";
+                }
+            }
+            else
+            {
+                die "selected fields problem: $field";
+            }
+        }
+        
+        if ($selectedFieldCount == 0)
+        {
+            die "No selected fields";
+        }
+        
+        #check fields in "where" portion of query
+        #support ONLY 1 conditional now.
+        #enforces form: "a.x = value"                   
+        if ($conditions=~/^\s*a\.([-\w]+)\s*=\s*('?.+'?)\s*$/)
+        {
+            $fileAField = $1;
+            $fileAFieldValue = $2;
+            
+            print STDERR "File A Field : $fileAField\n";
+            print STDERR "File A Field Value: $fileAFieldValue\n";
+                            
+            if (!exists($fileAFields{$fileAField}))
+            {
+                die "$fileAField does not exist in $fileA";
+            }
+        }
+        else
+        {
+            die "conditional fields problem: $conditions";
+        }
+        
+        ############################
+        #START THE REAL WORK HERE!!!
+        ############################
+        $headerProcessed = 0;
+        my %fieldAValues;
+        
+        print STDERR "Querying\n";
+        print STDERR "========\n";
+        
+        my $fieldACol = $labelA2col{$fileAField};
+        
+        while (<A>)
+        {
+            s/\r?\n?$//;
+            
+            if(!$headerProcessed)
+            {
+                my @fileAFields = split($delim, $_, $fileAColNo);
+                my $firstColumn = 1;
+                
+                #print desired fields from file A
+                for my $label (@fileASelectedFields)
+                {
+                    if ($firstColumn)
+                    {
+                        $firstColumn = 0;
+                    }
+                    else
+                    {
+                        print "\t";
+                    }
+
+                    print "$fileAFields[$labelA2col{$label}]";
+                    
+                }
+                
+                print "\n";
+                    
+                $headerProcessed = 1;
+            }
+            else
+            {
+                my @fileAFields = split($delim, $_, $fileAColNo);
+                
+                my $fieldAValue = $fileAFields[$fieldACol];
+                
+                if ($fieldAValue eq $fileAFieldValue)
+                {
+                    #print desired fields from file A
+                    my $firstColumn = 1;
+                    for my $label (@fileASelectedFields)
+                    {
+                        if ($firstColumn)
+                        {
+                            $firstColumn = 0;
+                        }
+                        else
+                        {
+                            print "\t";
+                        }
+    
+                        print "$fileAFields[$labelA2col{$label}]";
+                    }
+                
+                    print "\n"; 
+                }
+            }
+        }
+        
+        close(A);
+        close(B);
+    }
+    else
+    {
+        die "files problem";
+    }
+}
+else
+{
+    die "Query should be sfw form";
+}

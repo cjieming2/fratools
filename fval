@@ -1,0 +1,142 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+
+=comment until
+author: adrian
+created: 01122006
+updates:
+17042007
+updated for fraTools
+=cut
+
+my $verbose;
+my $debug;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('v'=>\$verbose, 'd'=>\$debug) || scalar(@ARGV)==0)
+{
+    print <<HELP;
+usage: fval -[vd] <filename>... 
+    
+       v - verbose
+       d - debug
+    
+       Checks if a genotype file is structurally valid
+       a)file extension
+       b)begins with sample-id or snp-id
+       c)no empty fields        
+       d)no trailing white spaces in fields
+       e)column labels are distinct
+       f)row labels are distinct
+       g)checks if number of columns are consistent
+       h)checks if encoding is valid (at this point, it just checks for >= -1 i.e. naive)
+    
+       If errors are detected, warnings are output to stderr
+       Will process multiple files.
+       
+       todo: include a .mk file option to check the encoding properly.
+       
+HELP
+
+    exit(1);
+}
+
+#iterates through each file
+foreach my $file (@ARGV) 
+{
+    print STDERR "==> $file <==\n" if ($#ARGV!=0);
+
+    my $gt;
+    my $tg;
+
+    if ($file=~/\.(gt|tg)$/)
+    {
+        if($file=~/\.gt$/)
+        {
+            $gt = 1;
+        }
+        
+        if($file=~/\.tg$/)
+        {
+            $tg = 1;
+        }
+    }
+    else
+    {
+        warn "File should have either .gt or .gt extension";
+    }
+   
+    open(IN, $file) || die "Cannot open $file";
+    my $colNo;
+    my @fields;
+    my %ROW_ELEMENTS;
+    my %COL_ELEMENTS;
+    my %ENCODING;
+    
+    while(<IN>)
+    {
+        s/\r?\n?$//;
+        
+        if($.==1)
+        {
+            $colNo = s/\t/\t/g + 1; 
+            @fields = split('\t', $_, $colNo);
+            
+            if ($gt && ($fields[0] ne 'sample-id'))
+            {       
+                warn "Gt file does not begin with 'sample-id'";
+            }
+            elsif ($tg && ($fields[0] ne 'snp-id'))
+            {       
+                warn "Tg file does not begin with 'snp-id'";
+            }
+            elsif ($fields[0]!~/(snp-id|sample-id)/)
+            {
+                warn "Genotype file does not begin with 'sample-id' or 'snp-id'";
+            }
+                        
+            for my $col (1 .. $#fields)
+            {
+                $COL_ELEMENTS{$fields[$col]}++;
+            }
+        }
+        else
+        {
+            @fields = split('\t', $_, $colNo+1);
+            warn "Row $. has ", scalar(@fields), " columns, it should have ", $colNo, " columns" if ($colNo!=scalar(@fields));
+            
+            $ROW_ELEMENTS{$fields[0]}++;
+            
+            for my $col (0 .. $#fields)
+            {
+                my $value = $fields[$col];
+                    
+                warn "Trailing spaces detected at column ", $col+1 if ($value=~s/(^\s+|\s+$)//);
+                warn "Empty field detected at column ", $col+1 if (length($value)==0);
+                
+                if ($col!=0)
+                {
+                    my $genotype = $value;
+                    
+                    unless($genotype>=-1)
+                    {
+                        warn "Unrecognised genotype encoding at column $col : $genotype";
+                    }
+                }
+            }
+        }
+    }
+        
+    warn "Column labels not distinct, there are ", scalar(keys(%COL_ELEMENTS)), " distinct values, there should be ", ($colNo-1), " values" if(scalar(keys(%COL_ELEMENTS))!=$colNo-1);
+    warn "Row labels not distinct, there are ", scalar(keys(%ROW_ELEMENTS)), " distinct values, there should be ", ($.-1), " values" if(scalar(keys(%ROW_ELEMENTS))!=$.-1);
+
+    close(IN);
+    
+    print STDERR "validation completed\n\n" if (scalar(@ARGV)>1);
+}

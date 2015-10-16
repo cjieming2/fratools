@@ -1,0 +1,572 @@
+#!/usr/bin/perl 
+
+use warnings;
+use DBI;
+use DBD::mysql;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX qw(ceil floor);
+
+=head1 NAME
+
+fannotatesnpswithgenes
+
+=head1 SYNOPSIS
+
+ fannotatesnpswithgenes [options] <mk-file> 
+
+  -h      help
+  -b      build version (hg17|hg18)
+  -w      window size (10000 default) [0,1M]
+ --mask   mask unannotated SNPs (default off)
+  mk-file marker file
+          a)snp-id          
+          b)chromosome
+          c)position
+          
+ example: fannotatesnpswithgenes pscalare.mk -b hg17 -w 10000
+ 
+ Annotations are based on UCSC tables and GO database.
+  
+ Returns a marker file - gene-annotated-<mk-file>
+ a)snp-id              : SNP name
+ b)chromosome          : chromosome where SNP is located
+ c)position            : position of SNP
+ d)known-gene-id       : gene ID in the known/UCSC gene table (UCSC)
+ e)entrez-id           : entrez gene id (UCSC)
+ f)gene-strand         : strand of gene (UCSC)
+ g)tx-start            : transcription start position (UCSC)
+ h)tx-end              : transcription end position (UCSC)
+ i)consequence         : location of SNP wrt Gene
+ j)gene-symbol         : gene symbol (UCSC)
+ k)gene-description    : gene description (UCSC)
+ l)pathway             : KEGG pathway description (UCSC)
+ m)biological-process  : GO category
+ n)molecular-function  : GO category
+ o)cellular-component  : GO category
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $build = 'hg18';
+my $mkFile;
+my $windowSize = 10000;
+my $maskUnannotatedSNPs = 0;
+my $colNo;
+my $headerProcessed;
+my %SNP;
+my %CHROM;
+my %GENE;
+my %label2Column;
+my $annotationCount = 0;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'b=s'=>\$build, 'w=i'=>\$windowSize, 'mask'=>\$maskUnannotatedSNPs) 
+   || $build !~ /(hg17|hg18)/
+   || $windowSize < 0 
+   || $windowSize > 1000000 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$mkFile = $ARGV[0];
+
+print STDERR <<SUMMARY;
+=======
+Options
+=======
+Build: $build
+Window Size: $windowSize
+Mask: $maskUnannotatedSNPs
+=======
+SUMMARY
+
+print STDERR "Reading $mkFile\n";
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+
+while(<MK>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		SEARCH_LABEL: for my $label('snp-id', 'chromosome', 'position')
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $label)
+				{			
+					$label2Column{$label}=$col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			die "Cannot find '$label' in $mkFile";
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		my $snpID = $fields[$label2Column{'snp-id'}];
+        my $chromosome = $fields[$label2Column{'chromosome'}];
+        $chromosome = $chromosome eq 'XY' ? 'X' : $chromosome;
+        my $position = $fields[$label2Column{'position'}];
+        
+        if ($chromosome ne 'n/a' && $position ne 'n/a')
+        {
+            $SNP{$snpID}{CHROM} = $chromosome;
+            $SNP{$snpID}{POS} = $position;
+            $SNP{$snpID}{ANNOTATED} = 0;
+            $CHROM{$chromosome}{$snpID} = $position;
+	    }
+	    else
+	    {
+	        warn "$snpID has no location";
+	    }
+	}
+}
+close(MK);
+
+my $dbh = DBI->connect(getDBConnectionString(), getDBUser(), getDBUserPassword()) || die "Couldn't connect to database: " . DBI->errstr;
+
+open(GENE_ANNOTATED_MK, ">gene-annotated-$mkFile") || die "Cannot open gene-annotated-$mkFile";
+print GENE_ANNOTATED_MK "snp-id\tchromosome\tposition\tknown-gene-id\tentrez-id\tgene-strand\ttx-start\ttx-end\tconsequence\tgene-symbol\tgene-description\tpathway\tbiological-process\tmolecular-function\tcellular-component\n";
+        
+if ($build eq 'hg17')
+{   
+    #populate gene annotation
+    print STDERR "retrieving gene annotation ... ";
+    print STDERR "kegg ... ";
+    $dbh->do(qq{
+        drop table if exists temp_kgid2keggpathway;
+    }) || die;
+    $dbh->do(qq{
+        create table temp_kgid2keggpathway 
+            select kgID, description as pathway 
+            from hg17_keggPathway as a left join hg17_keggMapDesc as b 
+            on a.mapID = b.mapID;
+    }) || die;
+    $dbh->do(qq{
+        alter table temp_kgid2keggpathway add index(kgID);
+    });
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway 
+            select a.kgID, geneSymbol, description, pathway 
+            from hg17_kgXref as a left join temp_kgid2keggpathway as b 
+            on a.kgID = b.kgID;
+    }) || die;
+    print STDERR "GO ... ";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go
+            select a.*,  b.biological_process, b.molecular_function, b.cellular_component
+            from temp_gene_pathway as a left join hg17_kgXgo as b 
+            on a.geneSymbol = b.geneSymbol;    
+    }) || die;
+    print STDERR "Entrez ID ... ";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go_entrez
+            select a.*, b.value as entrezID
+            from temp_gene_pathway_go as a left join hg17_knownToLocusLink as b 
+            on a.kgID = b.name;    
+    }) || die;
+    print STDERR "aggregating\n";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez_aggregate;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go_entrez_aggregate
+            select kgID as gene_id, 
+                   group_concat(distinct entrezID) as entrez_id,
+                   group_concat(distinct geneSymbol) as gene_symbol,
+                   group_concat(distinct description) as gene_description, 
+                   group_concat(distinct pathway) as pathway, 
+                   group_concat(distinct biological_process) as biological_process, 
+                   group_concat(distinct molecular_function) as molecular_function, 
+                   group_concat(distinct cellular_component) as cellular_component
+            from temp_gene_pathway_go_entrez group by kgID;    
+    }) || die;
+    
+    my $queryHandle = $dbh->prepare(qq{
+        select * from temp_gene_pathway_go_entrez_aggregate
+    }) || die;
+    
+    $queryHandle->execute();    
+    my ($geneID, $entrezID, $geneSymbol, $geneDescription, $pathway, $biologicalProcess, $molecularFunction, $cellularComponent);
+    $queryHandle->bind_columns(\($geneID, $entrezID, $geneSymbol, $geneDescription, $pathway, $biologicalProcess, $molecularFunction, $cellularComponent));
+    while (my @row = $queryHandle->fetchrow_array())
+    {
+        $GENE{$geneID}{GS} = !defined($geneSymbol) ? 'n/a' : $geneSymbol;
+        $GENE{$geneID}{ENTREZ_ID} = !defined($entrezID) ? 'n/a' : $entrezID;
+        $GENE{$geneID}{GD} = !defined($geneDescription) ? 'n/a' : $geneDescription;
+        $GENE{$geneID}{PW} = !defined($pathway) ? 'n/a' : $pathway;
+        $GENE{$geneID}{BP} = !defined($biologicalProcess) ? 'n/a' : $biologicalProcess;
+        $GENE{$geneID}{MF} = !defined($molecularFunction) ? 'n/a' : $molecularFunction;
+        $GENE{$geneID}{CC} = !defined($cellularComponent) ? 'n/a' : $cellularComponent;
+        
+        #print "$geneID\t$GENE{$geneID}{GS}\t$GENE{$geneID}{GD}\t$GENE{$geneID}{PW}\t$GENE{$geneID}{BP}\t$GENE{$geneID}{MF}\t$GENE{$geneID}{CC}\n";          
+    }        
+        
+    $dbh->do(qq{
+        drop table if exists temp_kgid2keggpathway;
+    });
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway;
+    });    
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go;
+    });    
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez;
+    });  
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez_aggregate;
+    });    
+    $queryHandle->finish();
+          
+    for my $chromosome (sort {if("$a$b"=~/^\d+$/){$a <=> $b}else{$a cmp $b}} keys(%CHROM))
+    {
+        print STDERR "Processing chromosome $chromosome ... ";
+        
+        print STDERR "sorting snps ... ";
+        my @sortedSNPs = sort {$SNP{$a}{POS} <=> $SNP{$b}{POS}} keys(%{$CHROM{$chromosome}});
+    
+        print STDERR "annotating snps with genes ... ";
+        $queryHandle = $dbh->prepare(qq{
+            select name, txstart, txend, strand from hg17_knownGene where chrom = 'chr$chromosome'
+        });
+        $queryHandle->execute();
+        my ($name, $txstart, $txend, $strand);
+        $queryHandle->bind_columns(\$name, \$txstart, \$txend, \$strand);
+        
+        my $chromosomeAnnotationCount = 0;
+        while (my @row = $queryHandle->fetchrow_array())
+        {
+            #search for starting point
+            my $left = 0;
+            my $right = $#sortedSNPs;
+            my $middle;
+            
+            my $leftConsequence = $strand eq '+'?'upstream':'downstream';
+            my $rightConsequence = $strand eq '+'?'downstream':'upstream';
+            
+            ++$txstart;
+            my $leftWindowStart = $txstart - $windowSize; #it's ok to be negative
+            my $rightWindowEnd = $txend + $windowSize;
+
+            #binary search
+            #search for the leftmost SNP after leftWindowStart
+            while ($left!=$right)
+            {
+                my $middle = floor(($left+$right)/2);
+                if ($SNP{$sortedSNPs[$middle]}{POS}<$leftWindowStart)
+                {
+                    $left = $middle+1;
+                }
+                else
+                {
+                    $right = $middle;
+                }                        
+            }
+            
+            my $i;
+            
+            #traverse back in case of multiple SNPs mapping to the same position           
+            for ($i=$left; $i>0; --$i)
+            {
+                if ($SNP{$sortedSNPs[$i]}{POS}<$leftWindowStart)
+                {
+                    last;                    
+                }
+                else
+                {
+                    $left = $i;
+                }
+            }
+            
+            $i = $left;
+            
+            #!(in the event where the gene is located after ALL the SNPs)
+            if ($i<=$#sortedSNPs && $SNP{$sortedSNPs[$i]}{POS} >= $leftWindowStart)
+            {
+                while ($i<=$#sortedSNPs && $SNP{$sortedSNPs[$i]}{POS}<$txstart)
+                {
+                    print GENE_ANNOTATED_MK "$sortedSNPs[$i]\t$SNP{$sortedSNPs[$i]}{CHROM}\t$SNP{$sortedSNPs[$i]}{POS}\t$name\t$GENE{$name}{ENTREZ_ID}\t$strand\t$txstart\t$txend\t$leftConsequence";
+                    print GENE_ANNOTATED_MK "\t$GENE{$name}{GS}\t$GENE{$name}{GD}\t$GENE{$name}{PW}\t$GENE{$name}{BP}\t$GENE{$name}{MF}\t$GENE{$name}{CC}\n";
+                    $SNP{$sortedSNPs[$i]}{ANNOTATED} = 1;
+                    ++$chromosomeAnnotationCount;
+                    ++$i;
+                }
+    
+                while ($i<=$#sortedSNPs && $SNP{$sortedSNPs[$i]}{POS}<=$txend)
+                {
+                    print GENE_ANNOTATED_MK "$sortedSNPs[$i]\t$SNP{$sortedSNPs[$i]}{CHROM}\t$SNP{$sortedSNPs[$i]}{POS}\t$name\t$GENE{$name}{ENTREZ_ID}\t$strand\t$txstart\t$txend\twithin-transcript";
+                    print GENE_ANNOTATED_MK "\t$GENE{$name}{GS}\t$GENE{$name}{GD}\t$GENE{$name}{PW}\t$GENE{$name}{BP}\t$GENE{$name}{MF}\t$GENE{$name}{CC}\n";
+                    $SNP{$sortedSNPs[$i]}{ANNOTATED} = 1;
+                    ++$chromosomeAnnotationCount;
+                    ++$i;
+                }
+    
+                while ($i<=$#sortedSNPs && $SNP{$sortedSNPs[$i]}{POS}<=$rightWindowEnd)
+                {
+                    print GENE_ANNOTATED_MK "$sortedSNPs[$i]\t$SNP{$sortedSNPs[$i]}{CHROM}\t$SNP{$sortedSNPs[$i]}{POS}\t$name\t$GENE{$name}{ENTREZ_ID}\t$strand\t$txstart\t$txend\t$rightConsequence";
+                    print GENE_ANNOTATED_MK "\t$GENE{$name}{GS}\t$GENE{$name}{GD}\t$GENE{$name}{PW}\t$GENE{$name}{BP}\t$GENE{$name}{MF}\t$GENE{$name}{CC}\n";
+                    $SNP{$sortedSNPs[$i]}{ANNOTATED} = 1;
+                    ++$chromosomeAnnotationCount;
+                    ++$i;
+                }
+            }
+        }
+
+        $queryHandle->finish();
+        $annotationCount += $chromosomeAnnotationCount;
+        print STDERR "$chromosomeAnnotationCount annotations for " . scalar(@sortedSNPs) . " SNPs\n";
+    } 
+}
+elsif ($build eq 'hg18')
+{
+    #populate gene annotation
+    print STDERR "retrieving gene annotation ... ";
+    print STDERR "kegg ... ";
+    $dbh->do(qq{
+        drop table if exists temp_kgid2keggpathway;
+    }) || die;
+    $dbh->do(qq{
+        create table temp_kgid2keggpathway 
+            select kgID, description as pathway 
+            from hg18_keggPathway as a left join hg18_keggMapDesc as b 
+            on a.mapID = b.mapID;
+    }) || die;
+    $dbh->do(qq{
+        alter table temp_kgid2keggpathway add index(kgID);
+    }) || die;
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway 
+            select a.kgID, geneSymbol, description, pathway 
+            from hg18_kgXref as a left join temp_kgid2keggpathway as b 
+            on a.kgID = b.kgID;
+    }) || die;
+    print STDERR "GO ... ";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go
+            select a.*,  b.biological_process, b.molecular_function, b.cellular_component
+            from temp_gene_pathway as a left join hg17_kgXgo as b 
+            on a.geneSymbol = b.geneSymbol;    
+    }) || die;
+    print STDERR "Entrez ID ... ";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go_entrez
+            select a.*, b.value as entrezID
+            from temp_gene_pathway_go as a left join hg18_knownToLocusLink as b 
+            on a.kgID = b.name;    
+    }) || die;
+    print STDERR "aggregating\n";
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez_aggregate;
+    }) || die;    
+    $dbh->do(qq{
+        create table temp_gene_pathway_go_entrez_aggregate
+            select kgID as gene_id,
+                   group_concat(distinct entrezID) as entrez_id,
+                   group_concat(distinct geneSymbol) as gene_symbol, 
+                   group_concat(distinct description) as gene_description, 
+                   group_concat(distinct pathway) as pathway, 
+                   group_concat(distinct biological_process) as biological_process, 
+                   group_concat(distinct molecular_function) as molecular_function, 
+                   group_concat(distinct cellular_component) as cellular_component
+            from temp_gene_pathway_go_entrez group by kgID;    
+    }) || die;
+    
+    my $queryHandle = $dbh->prepare(qq{
+        select * from temp_gene_pathway_go_entrez_aggregate
+    }) || die;
+    
+    $queryHandle->execute();    
+    my ($geneID, $entrezID, $geneSymbol, $geneDescription, $pathway, $biologicalProcess, $molecularFunction, $cellularComponent);
+    $queryHandle->bind_columns(\($geneID, $entrezID, $geneSymbol, $geneDescription, $pathway, $biologicalProcess, $molecularFunction, $cellularComponent));
+    while (my @row = $queryHandle->fetchrow_array())
+    {
+        $GENE{$geneID}{GS} = !defined($geneSymbol) ? 'n/a' : $geneSymbol;
+        $GENE{$geneID}{ENTREZ_ID} = !defined($entrezID) ? 'n/a' : $entrezID;
+        $GENE{$geneID}{GD} = !defined($geneDescription) ? 'n/a' : $geneDescription;
+        $GENE{$geneID}{PW} = !defined($pathway) ? 'n/a' : $pathway;
+        $GENE{$geneID}{BP} = !defined($biologicalProcess) ? 'n/a' : $biologicalProcess;
+        $GENE{$geneID}{MF} = !defined($molecularFunction) ? 'n/a' : $molecularFunction;
+        $GENE{$geneID}{CC} = !defined($cellularComponent) ? 'n/a' : $cellularComponent;
+        
+        #print "$geneID\t$GENE{$geneID}{GS}\t$GENE{$geneID}{GD}\t$GENE{$geneID}{PW}\t$GENE{$geneID}{BP}\t$GENE{$geneID}{MF}\t$GENE{$geneID}{CC}\n";          
+    }
+        
+        
+    $dbh->do(qq{
+        drop table if exists temp_kgid2keggpathway;
+    }) || die;
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway;
+    }) || die;    
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go;
+    }) || die;    
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez;
+    });  
+    $dbh->do(qq{
+        drop table if exists temp_gene_pathway_go_entrez_aggregate;
+    });     
+    $queryHandle->finish();
+          
+    for my $chromosome (sort {if("$a$b"=~/^\d+$/){$a <=> $b}else{$a cmp $b}} keys(%CHROM))
+    {
+        print STDERR "Processing chromosome $chromosome ... ";
+        
+        print STDERR "sorting snps ... ";
+        my @sortedSNPs = sort {$SNP{$a}{POS} <=> $SNP{$b}{POS}} keys(%{$CHROM{$chromosome}});
+    
+        print STDERR "annotating snps with genes ... ";
+        $queryHandle = $dbh->prepare(qq{
+            select name, txstart, txend, strand from hg18_knownGene where chrom = 'chr$chromosome'
+        });
+        $queryHandle->execute();
+        my ($name, $txstart, $txend, $strand);
+        $queryHandle->bind_columns(\$name, \$txstart, \$txend, \$strand);
+        
+        my $chromosomeAnnotationCount = 0;
+        while (my @row = $queryHandle->fetchrow_array())
+        {
+            #search for starting point
+            my $left = 0;
+            my $right = $#sortedSNPs;
+            my $middle;
+            
+            my $leftConsequence = $strand eq '+'?'upstream':'downstream';
+            my $rightConsequence = $strand eq '+'?'downstream':'upstream';
+            
+            ++$txstart;
+            my $leftWindowStart = $txstart - $windowSize; #it's ok to be negative
+            my $rightWindowEnd = $txend + $windowSize;
+
+            #binary search
+            #search for the leftmost SNP after leftWindowStart
+            while ($left!=$right)
+            {
+                my $middle = floor(($left+$right)/2);
+                if ($SNP{$sortedSNPs[$middle]}{POS}<$leftWindowStart)
+                {
+                    $left = $middle+1;
+                }
+                else
+                {
+                    $right = $middle;
+                }                        
+            }
+            
+            my $i;
+            
+            #traverse back in case of multiple SNPs mapping to the same position           
+            for ($i=$left; $i>0; --$i)
+            {
+                if ($SNP{$sortedSNPs[$i]}{POS}<$leftWindowStart)
+                {
+                    last;                    
+                }
+                else
+                {
+                    $left = $i;
+                }
+            }
+            
+            $i = $left;
+
+            #print "$name txstart: $txstart\ttxend: $txend\tleft: $left\t i: $i\t\t$leftWindowStart\t leftmostsnp: $SNP{$sortedSNPs[$i]}{POS} \t(" . ($SNP{$sortedSNPs[max($i-1, 0)]}{POS}-$leftWindowStart) .")" . ($SNP{$sortedSNPs[$i]}{POS}-$leftWindowStart). " \tleftwindowstart: $leftWindowStart\trightwindowend: $rightWindowEnd\n";
+            
+            #!(in the event where the gene is located after ALL the SNPs)
+            if ($i<=$#sortedSNPs && $SNP{$sortedSNPs[$i]}{POS} >= $leftWindowStart)
+            {
+                while ($i<=$#sortedSNPs && $SNP{$sortedSNPs[$i]}{POS}<$txstart)
+                {
+                    print GENE_ANNOTATED_MK "$sortedSNPs[$i]\t$SNP{$sortedSNPs[$i]}{CHROM}\t$SNP{$sortedSNPs[$i]}{POS}\t$name\t$GENE{$name}{ENTREZ_ID}\t$strand\t$txstart\t$txend\t$leftConsequence";
+                    print GENE_ANNOTATED_MK "\t$GENE{$name}{GS}\t$GENE{$name}{GD}\t$GENE{$name}{PW}\t$GENE{$name}{BP}\t$GENE{$name}{MF}\t$GENE{$name}{CC}\n";
+                    $SNP{$sortedSNPs[$i]}{ANNOTATED} = 1;
+                    ++$chromosomeAnnotationCount;
+                    ++$i;
+                }
+    
+                while ($i<=$#sortedSNPs && $SNP{$sortedSNPs[$i]}{POS}<=$txend)
+                {
+                    print GENE_ANNOTATED_MK "$sortedSNPs[$i]\t$SNP{$sortedSNPs[$i]}{CHROM}\t$SNP{$sortedSNPs[$i]}{POS}\t$name\t$GENE{$name}{ENTREZ_ID}\t$strand\t$txstart\t$txend\twithin-transcript";
+                    print GENE_ANNOTATED_MK "\t$GENE{$name}{GS}\t$GENE{$name}{GD}\t$GENE{$name}{PW}\t$GENE{$name}{BP}\t$GENE{$name}{MF}\t$GENE{$name}{CC}\n";
+                    $SNP{$sortedSNPs[$i]}{ANNOTATED} = 1;
+                    ++$chromosomeAnnotationCount;
+                    ++$i;
+                }
+    
+                while ($i<=$#sortedSNPs && $SNP{$sortedSNPs[$i]}{POS}<=$rightWindowEnd)
+                {
+                    print GENE_ANNOTATED_MK "$sortedSNPs[$i]\t$SNP{$sortedSNPs[$i]}{CHROM}\t$SNP{$sortedSNPs[$i]}{POS}\t$name\t$GENE{$name}{ENTREZ_ID}\t$strand\t$txstart\t$txend\t$rightConsequence";
+                    print GENE_ANNOTATED_MK "\t$GENE{$name}{GS}\t$GENE{$name}{GD}\t$GENE{$name}{PW}\t$GENE{$name}{BP}\t$GENE{$name}{MF}\t$GENE{$name}{CC}\n";
+                    $SNP{$sortedSNPs[$i]}{ANNOTATED} = 1;
+                    ++$chromosomeAnnotationCount;
+                    ++$i;
+                }
+            }
+        }
+
+        $queryHandle->finish();
+        $annotationCount += $chromosomeAnnotationCount;
+        print STDERR "$chromosomeAnnotationCount annotations for " . scalar(@sortedSNPs) . " SNPs\n";
+    }    
+}
+
+if(!$maskUnannotatedSNPs)
+{
+    for my $snpID (keys(%SNP))
+    {
+        if (!$SNP{$snpID}{ANNOTATED})
+        {
+            print GENE_ANNOTATED_MK "$snpID\t$SNP{$snpID}{CHROM}\t$SNP{$snpID}{POS}" . "\tn/a" x 12 . "\n";
+        }
+    }
+}
+
+close(GENE_ANNOTATED_MK);  
+$dbh->disconnect();

@@ -1,0 +1,165 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Pod::Usage;
+use File::Basename;
+use Switch;
+
+=head1 NAME
+
+tgr2tg
+
+=head1 SYNOPSIS
+
+ tgr2tg [options] tgr-file
+    
+  -m        marker annotation file
+            a)snp-id
+            b)alleles
+  tg-file   tg file
+  
+ example: tgr2tg -m pscalare.mk pscalare.tg
+    
+ Converts tgr file to tgr format.
+       
+=head1 DESCRIPTION
+ 
+=cut
+
+#option variables
+my $help;
+my $mkFile;
+my $tgrFile;
+my $tgFile;
+my %MARKER;
+my $colNo;
+my %label2Column;
+my $headerProcessed;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'm=s'=>\$mkFile)
+   || !defined($mkFile)
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label ('marker_id', 'alleles')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+            
+            die "Cannot find '$label' in $mkFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        
+        my $marker = $fields[$label2Column{'marker_id'}];
+        my $alleles = $fields[$label2Column{'alleles'}];
+        my @alleles = split("/", $alleles);
+        
+        for my $i (0 .. $#alleles)
+        {
+        	$MARKER{$marker}{$alleles[$i]} = $i;
+    	}
+    }
+}
+close(MK);
+
+$tgrFile = $ARGV[0];
+my ($name, $path, $ext) = fileparse($tgrFile, '\..*');
+$tgFile = "$name.tg";
+
+open(TGR, "$tgrFile") || die "Cannot open $tgrFile\n";
+open(TG, ">$tgFile") || die "Cannot open $tgFile\n";
+$headerProcessed = 0;
+
+while (<TGR>)
+{
+    s/\r?\n?$//;
+   
+    if(!$headerProcessed)
+    {
+        #counts number of columns
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        print TG "$_\n";
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+    
+    	my $marker = $fields[0];
+    
+    	if (exists($MARKER{$marker}))
+    	{
+	        print TG "$marker";
+	               
+	        for my $col (1..$#fields)
+	        {
+	        	my @genotypes = split("/", $fields[$col]);
+	        	
+	        	my $g0 = -1;
+	        	my $g1 = -1;
+	        	
+	        	if ($genotypes[0]!=-1)
+	        	{
+	               	$g0 = $MARKER{$marker}{$genotypes[0]};
+	            }
+	            
+	            if ($genotypes[1]!=-1)
+	        	{
+	            	$g1 = $MARKER{$marker}{$genotypes[1]};
+	            }
+	            print TG "\t$g0/$g1";
+	        }
+	        
+	        print TG "\n";
+		}
+		else
+		{
+			warning("$marker does not exist in $mkFile, ignored");
+		}
+    }
+}
+
+close(TGR);
+close(TG);

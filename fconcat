@@ -1,0 +1,179 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+fconcat
+
+=head1 SYNOPSIS
+
+ fconcat [options] genotype-file... 
+
+  -h             help
+  -l             list of column names to be concatenated (required)
+  -o             output file (required)
+  genotype-file  gt or tg file
+    
+  example: fconcat -l snps-317459.txt -o ra-317459.txt *.txt
+           fconcat -l snps.mk -o all.gt *.gt
+            
+  Concatenates several files based on a list of values.
+  Files concatenated should be in tab format where the first line is the list
+  of column names.
+
+  xeno ELEMENT : ELEMENT that are not listed in the snp-list.
+  unadded ELEMENT : SNPs in the snp-list that are not in the file to be 
+  concatenated.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $verbose;
+my $selectionFile;
+my $outFile;
+
+#variables
+my $check; # function pointer to isGt or isTg
+my $colNo;
+my %ELEMENT;
+my @sortedElements;
+my $headerProcessed;
+my $missingData;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'v'=>\$verbose, 'l=s' => \$selectionFile, 'o=s' => \$outFile) 
+   || $help || scalar(@ARGV)==0 || !defined($selectionFile) || !defined($outFile))
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+if (isGt($ARGV[0]))
+{
+    $check = \&isGt;
+    $missingData = -1;
+}
+elsif (isTg($ARGV[0]))
+{
+    $check = \&isTg;
+    $missingData = -1;
+}
+else
+{
+    $check = sub {return 1};
+    $missingData = 'n/a';
+    warn "$ARGV[0] not a genotype file, proceeding to concat non genotype file" if $verbose;
+}
+
+#process snp list
+open(SELECTION, $selectionFile) || die "Cannot open $selectionFile\n";
+$headerProcessed = 0;
+while (<SELECTION>)
+{
+    s/\r?\n?$//;
+    
+    my @fields = split('\t', $_, 2);
+    
+    if (exists($ELEMENT{$fields[0]}))
+    {
+        die "Duplicate element id in element list: $fields[0]";
+    }
+    else
+    {
+        $ELEMENT{$fields[0]} = -1;
+        push(@sortedElements, $fields[0]);
+    }
+}
+
+#prepare output file
+open(OUT, ">$outFile") || die "Cannot open $outFile\n";
+print OUT join("\t", @sortedElements) . "\n";
+
+#iterates through each file and concatenates it to OUT
+foreach my $file (@ARGV) 
+{
+    if (!&$check($file))
+    {
+        die "$file not in same orientation as the first file";
+    }
+    
+    open(IN, $file) || die "Cannot open $file\n";
+    
+    #reset snp2col mapping
+    map {$ELEMENT{$_}=-1} (@sortedElements);
+    
+    $headerProcessed = 0;
+    
+    while (<IN>)
+    {
+        s/\r?\n?$//;
+        
+        if (!$headerProcessed)
+        {
+            $colNo = s/\t/\t/g + 1;
+            
+            my @fields = split('\t', $_, $colNo);
+            
+            for my $col (1 .. $#fields)
+            {
+                my $element = $fields[$col];
+                    
+                if(exists $ELEMENT{$element})
+                {
+                    $ELEMENT{$element} = $col;
+                }
+            }
+            
+            #notes the elements in the element list that are not in this file
+            for my $element (@sortedElements)
+            {
+                if ($ELEMENT{$element}==-1)
+                {
+                    warn "$element not found in $file" if $verbose;
+                }
+            }
+            
+            $headerProcessed = 1;
+        }
+        else
+        {
+            my @fields = split('\t', $_, $colNo);
+            
+            print OUT $fields[0];
+            
+            for my $element (@sortedElements)
+            {
+                if ($ELEMENT{$element} == -1)
+                {
+                    print OUT "\t$missingData";
+                }
+                else
+                {
+                    print OUT "\t$fields[$ELEMENT{$element}]";
+                }
+            }
+            
+            print OUT "\n";
+        }
+    }
+    
+    close(IN);
+}
+
+close(OUT);

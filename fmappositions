@@ -1,0 +1,154 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use fralib;
+use File::Basename;
+use POSIX qw(ceil floor);
+use File::Path;
+use Pod::Usage;
+
+=head1 NAME
+
+fmappositions
+
+=head1 SYNOPSIS
+
+ fmappositions
+    
+  -h           help
+  -map         mapping file
+               a)snp-id
+               b)position
+  mk-file      marker file ...
+
+ example: fmappositions --map mapping.mk pscalare.mk ...
+ 
+ Maps positions.
+
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $mapFile;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions('h'=>\$help, 'map=s'=>\$mapFile, ) 
+   || scalar(@ARGV)<1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my $mkFile;
+my $headerProcessed;
+my %label2Column;
+my $colNo;
+my %SNP;
+
+open(MAP_MK, $mapFile) || die "Cannot open $mapFile";
+     		
+while(<MAP_MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+         
+        SEARCH_LABEL: for my $label ('snp-id', 'position')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+
+                die "Cannot find '$label' in $mapFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $snpID = $fields[$label2Column{'snp-id'}];
+        my $position = $fields[$label2Column{'position'}];
+        
+    	$SNP{$snpID} = $position;
+	} 
+}
+
+close(MAP_MK);
+
+my $positionColumn;
+
+for $mkFile (@ARGV)
+{
+	open(MK, $mkFile) || die "Cannot open $mkFile";
+	open(NEW_MK, ">modified-$mkFile") || die "Cannot open modified-$mkFile";
+	        
+	$headerProcessed = 0;  		
+	while(<MK>)
+	{
+	    s/\r?\n?$//;
+	    
+	    if(!$headerProcessed)
+	    {
+	        $colNo = s/\t/\t/g + 1;
+	        
+	        my @fields = split('\t', $_, $colNo);
+	         
+	        SEARCH_LABEL: for my $label ('SNP', 'Position')
+	        {
+	            for my $col (0 .. $#fields)
+	            {
+	                if ($fields[$col] eq $label)
+	                {           
+	                    $label2Column{$label}=$col;
+	                    next SEARCH_LABEL;
+	                }
+	            }
+	
+	                die "Cannot find '$label' in $mkFile";
+	        }
+	        
+	        print NEW_MK "$_\n";
+	        
+	        $positionColumn = $label2Column{"Position"};
+	        $headerProcessed = 1;
+	    }
+	    else
+	    {
+	        my @fields = split('\t', $_, $colNo);
+	        my $snpID = $fields[$label2Column{'snp-id'}];
+	        my $position = $fields[$label2Column{'position'}];
+	        
+	        if(exists($SNP{$snpID}))
+	        {
+	        	$fields[$positionColumn] = $SNP{$snpID};
+	        
+	        	print NEW_MK join("\t", @fields) . "\n";
+	        }
+		} 
+	}
+	
+	close(MK);
+	close(NEW_MK);
+}

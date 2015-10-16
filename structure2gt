@@ -1,0 +1,143 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+structure2gt
+
+=head1 SYNOPSIS
+
+ structure2gt [options] <structure-file>  
+
+  -v       verbose
+  -d       debug
+  gt-file  sample major genotype file
+
+ example: structure2gt structure
+         
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $verbose;
+my $debug;
+my $help;
+my $gtrFile;
+my $sampleAnnotationFile;
+my $mkFile;
+my $paramFile;
+my $extraParamFile;
+
+#common data variables
+my $colNo;
+my %label2col;
+
+#data structures
+my %SAMPLE;
+my %SNP;
+my %POPULATION;
+my $snpNo;
+my $sampleNo;
+my $popNo;
+my @col2snp;
+my $structureFile;
+my $sampleID;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('v'=>\$verbose, 'd'=>\$debug, 'h'=>\$help) 
+   || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$structureFile = $ARGV[0];
+open (STRUCTURE, $structureFile) || die "Cannot open $structureFile";
+
+my ($name, $path, $ext) = fileparse($structureFile, '\..*');
+$gtrFile = "$name.gtr";
+open (GTR, ">$gtrFile") || die "Cannot open $gtrFile";
+
+while (<STRUCTURE>)
+{
+    s/\r?\n?$//;
+    
+    if($.==1)
+    {
+        my @fields = split(' ');
+        
+        print GTR "sample-id";
+        for my $col (0..$#fields)
+        {
+            $col2snp[$col+5] = $fields[$col];
+            $SNP{$fields[$col]} = ();
+            print GTR "\t$fields[$col]";
+            
+            ++$snpNo;
+        }
+        print GTR "\n";
+    }
+    else
+    {
+    	my @fields1 = split(' ');
+		$_ = <STRUCTURE>;
+		my @fields2 = split(' ');
+		$sampleID = $fields1[0];
+        print GTR "$sampleID";
+	    
+	    for my $col (5..$#fields1)
+        {
+        	$fields1[$col] = ($fields1[$col] == -9) ? -1 : $fields1[$col];
+        	$fields2[$col] = ($fields2[$col] == -9) ? -1 : $fields2[$col];
+        	
+        	if ($fields1[$col]!=-1)
+        	{
+        		$SNP{$col2snp[$col]}{$fields1[$col]} = ();
+            }
+            if ($fields2[$col]!=-1)
+        	{
+            	$SNP{$col2snp[$col]}{$fields2[$col]} = ();
+            }
+            
+            print GTR "\t$fields1[$col]/$fields2[$col]";
+        }
+        print GTR "\n";
+    }
+	
+	++$sampleNo;
+}
+
+close(STRUCTURE);
+close(GTR);
+
+$mkFile = "$name.mk";
+open (MK, ">$mkFile") || die "Cannot open $mkFile";
+print MK "marker_id\talleles\talleleCount\n";
+
+for my $marker (keys(%SNP))
+{
+	my @alleles = sort {$a <=> $b} keys(%{$SNP{$marker}});
+	my $alleleCount = $#alleles + 1;
+	my $alleles = join("/", @alleles);
+	
+	print MK "$marker\t$alleles\t$alleleCount\n";
+}
+close(MK);
+
+print "No of samples: $sampleNo\n";
+print "No of snps: $snpNo\n";

@@ -1,0 +1,290 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX;
+
+=head1 NAME
+
+fxss
+
+=head1 SYNOPSIS
+
+ fxss [options] <mk-file>	
+
+  -h       help
+  -s       sampleNo
+           (default : 10)
+  -p       pseudo bootstrap
+  -d       minimum intermarker distance
+           (default : 10000)
+  mk-file  mk-file
+  
+  example: fxss pscalare.mk
+           fxss -d 10000 pscalare.mk
+
+  Samples from a mk-file.  Sub-samples are named s<no>-<mk-file>.
+  Pseudo bootstrap allows there to be overlap of SNPs between any 2 
+  sub-samples. Intermarker distance will ensure that any 2 successive 
+  SNPs will not be closer than stated inter marker distance.  
+  
+  There is no sample size restriction to due to complications in ensuring
+  a uniform representative subset of the original SNP set.
+    
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $verbose;
+my $debug;
+my $help;
+my $sampleNo = 10;
+my $interMarkerDistance = 10000;
+my $mkFile;
+my $colNo;
+my $outFile;
+my $headerProcessed;
+my $pseudoBootstrap;
+my %label2Column;
+my %CHROM;
+my %SNP;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help,
+                's=i'=>\$sampleNo, 
+                'd=i'=>\$interMarkerDistance,
+                'p'=>\$pseudoBootstrap)
+	|| $sampleNo<1
+    || $interMarkerDistance < 0
+	|| scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+print STDERR "Sample No: $sampleNo\n";
+print STDERR "Intermarker Distance: $interMarkerDistance\n";
+
+$mkFile = $ARGV[0];
+
+#read mk-file
+print "Reading $mkFile\n";
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+         
+        SEARCH_LABEL: for my $label ('snp-id', 'chromosome', 'position')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+
+           	die "Cannot find '$label' in $mkFile";
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $snpID = $fields[$label2Column{'snp-id'}];
+        my $chromosome = $fields[$label2Column{'chromosome'}];
+		my $position = $fields[$label2Column{'position'}];
+
+	    #only considers SNPs with positions
+		if ($chromosome ne 'n/a' && $position ne 'n/a')
+		{
+        	$SNP{$snpID}{CHROMOSOME} = $chromosome;
+        	$SNP{$snpID}{POSITION} = $position;
+        	if (!defined($CHROM{$chromosome}))
+        	{
+        		$CHROM{$chromosome} = ();
+        	}
+        	push(@{$CHROM{$chromosome}}, $snpID);
+		}
+		else
+		{
+			warn "$snpID has no chromosomal position";
+		}
+    }
+}
+close(MK);
+
+#sort SNPs
+print "Sorting SNPs\n";
+for my $chromosome(keys(%CHROM))
+{
+	@{$CHROM{$chromosome}} = sort {$SNP{$a}{POSITION} <=> $SNP{$b}{POSITION}} @{$CHROM{$chromosome}};
+}
+
+my %SAMPLES;
+
+#sample SNPs
+my $samplesGenerated = 0;	
+
+while ($samplesGenerated!=$sampleNo)
+{	
+	print "Generating sample " . ($samplesGenerated+1) . "\n";
+	my %SELECTED_CHROMOSOMES;
+	
+	for my $chromosome(keys(%CHROM))
+	{
+		my @selectedSNPs = ();
+		
+		if (scalar(@{$CHROM{$chromosome}}) == 0)
+		{
+			next;
+		}
+		elsif (scalar(@{$CHROM{$chromosome}}) == 1)
+		{
+			push (@selectedSNPs, $CHROM{$chromosome}[0]);
+			if (!$pseudoBootstrap)
+			{
+				splice(@{$CHROM{$chromosome}}, 0, 1);
+			}
+			$SELECTED_CHROMOSOMES{$chromosome} = \@selectedSNPs;
+		
+			next;
+		}
+		
+		#pick a random SNP
+		my $selectedIndex = int(rand(scalar(@{$CHROM{$chromosome}})));
+		
+		push (@selectedSNPs, $CHROM{$chromosome}[$selectedIndex]);
+		
+		my $left = $selectedIndex;
+		my $right = $selectedIndex;
+		my $lastLeftPosition = $SNP{$CHROM{$chromosome}[$left]}{POSITION};
+		my $lastRightPosition = $SNP{$CHROM{$chromosome}[$right]}{POSITION};
+
+		if (!$pseudoBootstrap)
+		{
+			splice(@{$CHROM{$chromosome}}, $left, 1);
+			--$right;
+		}
+		
+		while ($left > 0)
+		{
+			if ($lastLeftPosition - $SNP{$CHROM{$chromosome}[$left-1]}{POSITION} > $interMarkerDistance)
+			{
+				unshift(@selectedSNPs, $CHROM{$chromosome}[$left-1]);
+				$lastLeftPosition = $SNP{$CHROM{$chromosome}[$left-1]}{POSITION};
+				
+				if (!$pseudoBootstrap)
+				{
+					splice(@{$CHROM{$chromosome}}, $left-1, 1);
+					--$right;
+					--$left;
+				}
+				else
+				{
+					--$left;
+				}
+			}
+			else
+			{
+				--$left;
+			}
+		}
+
+		while ($right < scalar(@{$CHROM{$chromosome}})-1)
+		{
+			if ($SNP{$CHROM{$chromosome}[$right+1]}{POSITION} - $lastRightPosition > $interMarkerDistance)
+			{
+				push (@selectedSNPs, $CHROM{$chromosome}[$right+1]);
+				$lastRightPosition = $SNP{$CHROM{$chromosome}[$right+1]}{POSITION};
+				
+				if (!$pseudoBootstrap)
+				{
+					splice(@{$CHROM{$chromosome}}, $right+1, 1);
+				}
+				else
+				{
+					++$right;
+				}
+			}
+			else
+			{
+				++$right;
+			}
+		}
+		
+		$SELECTED_CHROMOSOMES{$chromosome} = \@selectedSNPs;
+	}
+	
+	++$samplesGenerated;
+	$SAMPLES{$samplesGenerated} = \%SELECTED_CHROMOSOMES;
+}
+
+
+#print out subsets
+print "sample-no\taverage-interval\tinterval-no\tminimum-interval\tmaximum-interval\n";
+for my $sample (sort {$a <=> $b} keys(%SAMPLES))
+{
+	my $sum = 0;
+	my $n = 0;
+	my $minInterval = INT_MAX;
+	my $maxInterval = -1;
+	
+	my $outFile = "s$sample-$mkFile";
+	open(OUT, ">$outFile") || die "Cannot open $outFile";
+	print OUT "snp-id\tchromosome\tposition\n";
+
+	for my $chromosome (keys %{$SAMPLES{$sample}})
+	{
+		my $lastPosition = -1;
+		
+		for my $snp (sort {$SNP{$a}{POSITION} <=> $SNP{$b}{POSITION}} @{$SAMPLES{$sample}{$chromosome}})
+		{
+			print OUT "$snp\t$SNP{$snp}{CHROMOSOME}\t$SNP{$snp}{POSITION}\n";
+		
+			if ($lastPosition != -1)
+			{
+				++$n;
+				my $interval = $SNP{$snp}{POSITION} - $lastPosition;
+				$sum += $interval;
+				$minInterval = $interval<$minInterval ?  $interval : $minInterval;
+				$maxInterval = $interval>$maxInterval ? $interval : $maxInterval;
+			}
+			
+			$lastPosition = $SNP{$snp}{POSITION};
+		}
+	}
+	
+	close(OUT);
+	
+	if ($n!=0)
+	{
+		print "$sample\t" . $sum/$n . "\t" . $n . "\t$minInterval\t$maxInterval\n";
+	}
+	else
+	{
+		print "$sample\tn/a\t" . $n . "\t$minInterval\t$maxInterval\n";
+	}
+}	

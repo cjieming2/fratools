@@ -1,0 +1,276 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Path;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+fstats
+
+=head1 SYNOPSIS
+
+ fstats [options] <fra-file>
+    
+  -c        cutoff call rate [0,100]
+  fra-file	fra file
+  
+ example: fstats pscalare.tg
+          fstats pscalare.gt
+    
+ Provides statistics for a genotype file.
+ 1)Sample call rate
+ 2)SNP call rate
+ 3)Number of monomorphic snps
+ 4)Allele frequency
+       
+=head1 DESCRIPTION
+ 
+=cut
+
+#option variables
+my $help;
+my $verbose;
+my $debug;
+my $cutoff = 0.9;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'v'=>\$verbose,'d'=>\$debug,'c=f'=>\$cutoff) ||
+    $cutoff<0 || $cutoff>100 || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my $fraFile = $ARGV[0];
+
+#iterates through each file
+my $colNo;
+my %ROW_ALLELES;
+my %COL_ALLELES;
+my @col2name;
+my $fraFile_type;
+
+if (!isGtOrTg($fraFile))
+{
+    die "$fraFile is not a genotype file";
+}
+
+open(IN, $fraFile) || die "Cannot open $fraFile";
+
+my $headerProcessed;
+while (<IN>)
+{
+    s/\r?\n?$//;
+        
+    if (!$headerProcessed)
+    {
+        #checks for number of columns
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+               
+        for my $col (1 .. $#fields)
+        {
+            $COL_ALLELES{$fields[$col]} = ();
+            $COL_ALLELES{$fields[$col]}{0} = 0;
+            $COL_ALLELES{$fields[$col]}{1} = 0;
+            $COL_ALLELES{$fields[$col]}{2} = 0;
+            $col2name[$col] = $fields[$col];
+        }
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        
+        $ROW_ALLELES{$fields[0]}{0} = 0;
+        $ROW_ALLELES{$fields[0]}{1} = 0;
+        $ROW_ALLELES{$fields[0]}{2} = 0;
+        
+        for my $col (1 .. $#fields)
+        {
+            if ($fields[$col] != -1)
+            {
+                if($fields[$col]=~/^[012]$/)
+                {
+                    $ROW_ALLELES{$fields[0]}{$fields[$col]}++;
+                    $COL_ALLELES{$col2name[$col]}{$fields[$col]}++;
+                }
+                else
+                {
+                    die "Genotype code should be numerical at column $col";
+                }
+            }
+        }
+    }
+}
+close(IN);
+
+#reporting
+my %SAMPLES;
+my %SNPS;
+
+if(isTg($fraFile))
+{
+    %SAMPLES = %COL_ALLELES;
+    %SNPS = %ROW_ALLELES;
+}
+elsif(isGt($fraFile))
+{
+    %SAMPLES = %ROW_ALLELES;
+    %SNPS = %COL_ALLELES;
+}
+
+my $NSAMPLES = scalar(keys(%SAMPLES));
+my $NSNPS = scalar(keys(%SNPS));
+
+#make report directory
+my ($name, $path, $ext) = fileparse($fraFile, '\..*');
+my $reportDir = "$name$ext-report";
+if (-e "$reportDir") 
+{
+    rmtree("$reportDir", 1, 1);
+}
+
+mkdir("$reportDir", 0755);
+
+open(GENOTYPE_BY_SAMPLES, ">$reportDir/samples.txt") || die "Cannot open $reportDir/samples.txt\n";
+    
+print GENOTYPE_BY_SAMPLES "sample-id\tA_A\tA_B\tB_B\t?_?\tsample-call-rate\n";
+for my $sample (keys(%SAMPLES))
+{
+    print GENOTYPE_BY_SAMPLES "$sample";
+    
+    for my $key (0..2)
+    {
+        if (exists($SAMPLES{$sample}{$key}))
+        {
+            print GENOTYPE_BY_SAMPLES "\t$SAMPLES{$sample}{$key}";
+        }
+        else
+        {
+            print GENOTYPE_BY_SAMPLES "\t0";
+        }
+    }
+    
+    my $noCall = $NSNPS - $SAMPLES{$sample}{0} - $SAMPLES{$sample}{1} - $SAMPLES{$sample}{2};
+    
+    printf GENOTYPE_BY_SAMPLES "\t$noCall\t%f\n", 1-$noCall/$NSNPS;
+}
+
+close(GENOTYPE_BY_SAMPLES);
+
+open(GENOTYPE_BY_SNPS, ">$reportDir/snps.txt") || die "Cannot open $reportDir/snps.txt\n";
+open(MONO, ">$reportDir/mono.txt") || die "Cannot open $reportDir/mono.txt\n";
+
+print GENOTYPE_BY_SNPS "snp-id\tA_A\tA_B\tB_B\t?_?\tsnp-call-rate\tallele-A-frequency\tminor-allele-frequency\n";
+
+my $mono = 0;
+my $snpGeCutoff = 0;
+
+for my $snp (keys(%SNPS))
+{
+    my $N = 0;
+    my $alleleCount;
+    
+    print GENOTYPE_BY_SNPS "$snp";
+    
+    for my $key (0..2)
+    {
+        $alleleCount = $SNPS{$snp}{$key};
+        
+        if (exists($SNPS{$snp}{$key}))
+        {
+            print GENOTYPE_BY_SNPS "\t$alleleCount";
+            $N += $SNPS{$snp}{$key}
+        }
+        else
+        {
+            print GENOTYPE_BY_SNPS "\t0";
+        }
+    }
+    
+    my $alleleACount = $SNPS{$snp}{1};
+    my $alleleBCount = $alleleACount;
+    $alleleACount += 2*$SNPS{$snp}{0};
+    $alleleBCount += 2*$SNPS{$snp}{2};
+    my $totalAlleles = $alleleACount+$alleleBCount;
+    my $alleleAFreq;
+    if ($totalAlleles==0)
+    {
+    	$alleleAFreq = 'n/a';
+    }
+    else
+    {
+    	$alleleAFreq = $alleleACount/$totalAlleles;
+    	
+    	if ($alleleAFreq==1 || $alleleAFreq==0)
+    	{
+    		$mono++;
+    		print MONO "$snp\n";
+    	}    	
+    }
+                    
+    my $noCall = $NSAMPLES - $SNPS{$snp}{0} - $SNPS{$snp}{1} - $SNPS{$snp}{2};
+    my $snpCallRate = 1-$noCall/$NSAMPLES;
+    
+    if ($snpCallRate >= $cutoff)
+    {
+    	$snpGeCutoff++;
+    }
+    
+    if ($alleleAFreq eq 'n/a')
+    {
+    	printf GENOTYPE_BY_SNPS "\t$noCall\t%f\t$alleleAFreq\tn/a\n", $snpCallRate;
+    }
+    else
+    {
+    	printf GENOTYPE_BY_SNPS "\t$noCall\t%f\t%f\t%f\n", $snpCallRate, $alleleAFreq, $alleleAFreq<0.5?$alleleAFreq:1-$alleleAFreq;
+	}
+}
+
+close(GENOTYPE_BY_SNPS);
+close(MONO);
+
+my $sampleGeCutoff = 0;
+
+for my $sample (keys(%SAMPLES))
+{
+    my $callRate = 0;
+
+    for my $value (values(%{$SAMPLES{$sample}}))
+    {
+        $callRate += $value;
+    }
+    
+    $callRate /= scalar(keys(%SNPS));
+    
+    if ($callRate>=$cutoff)
+    {
+        $sampleGeCutoff++;
+    }
+}
+
+open(SUMMARY, ">$reportDir/summary.txt") || die "Cannot open $reportDir/summary.txt\n";
+
+printf SUMMARY "Sample call rate >= %d%% : %d/%d (%3.2f%%)\n" , $cutoff*100, $sampleGeCutoff, scalar(keys(%SAMPLES)), 100*$sampleGeCutoff/scalar(keys(%SAMPLES)); 
+printf SUMMARY "SNP call rate >= %d%% : %d/%d (%3.2f%%)\n" , $cutoff*100, $snpGeCutoff, scalar(keys(%SNPS)), 100*$snpGeCutoff/scalar(keys(%SNPS)); 
+printf SUMMARY "Monomorphic SNPs : %d/%d (%3.2f%%)\n", $mono, scalar(keys(%SNPS)), 100*$mono/scalar(keys(%SNPS)); 
+
+printf "Sample call rate >= %d%% : %d/%d (%3.2f%%)\n" , $cutoff*100, $sampleGeCutoff, scalar(keys(%SAMPLES)), 100*$sampleGeCutoff/scalar(keys(%SAMPLES)); 
+printf "SNP call rate >= %d%% : %d/%d (%3.2f%%)\n" , $cutoff*100, $snpGeCutoff, scalar(keys(%SNPS)), 100*$snpGeCutoff/scalar(keys(%SNPS)); 
+printf "Monomorphic SNPs : %d/%d (%3.2f%%)\n", $mono, scalar(keys(%SNPS)), 100*$mono/scalar(keys(%SNPS)); 

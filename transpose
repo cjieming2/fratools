@@ -1,0 +1,439 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use POSIX qw(ceil floor);
+use File::Path;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+transpose
+
+=head1 SYNOPSIS
+
+ transpose [options] file	
+	
+  -v    verbose
+  -d    debug
+  -h    displays this help page
+  file  fra file or any tab delimited rectangular file
+  
+ Transposes a tab delimited rectangular file.
+ Accepts STDIN too.
+ If fra file, header and extension shall be renamed appropriately.
+ Generic tab delimited File transposed is named transposed-<file-name>.
+ Use a node with a large amount of memory while transposing large files
+ (> 100 MB) e.g. compute-1-12 or compute-1-13
+        
+=head1 DESCRIPTION
+
+ This requires a rewrite.  Dangerous use of $.
+ 
+=cut
+
+#option variables
+my $verbose;
+my $debug;
+my $help;
+my $USE_STDIN = 0;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('v'=>\$verbose,'d'=>\$debug,'h'=>\$help) || $help)
+{
+    if ($help)
+    {
+        pod2usage(1);
+    }
+}
+
+#read from STDIN
+if (scalar(@ARGV)==0)
+{
+	#allows the control to enter the file iteration for-loop
+	push (@ARGV, "stdout");
+	$USE_STDIN = 1;
+	#mute verbose and debug statements to prevent stdout/stdin corruption
+	$verbose = 0;
+	$debug = 0;
+}
+
+my $odir; 
+
+#iterates through each file
+foreach my $file (@ARGV) 
+{
+	my $isGt;
+	my $isTg;
+	
+	if(!$USE_STDIN)
+	{
+		$isGt = isGt($file);
+		$isTg = isTg($file);
+		if ($verbose && !$isGt && !$isTg) {warn "$file is not a genotype file";}
+	}
+
+    my ($name, $path, $ext) = fileparse($file, '\..*');
+	my $outFile = "$name$ext";
+	if ($isGt)
+	{
+		$outFile =~ s/\.gt$/.tg/;
+	}
+	elsif ($isTg)
+	{
+		$outFile =~ s/\.tg$/.gt/;		
+	}
+	else
+	{
+		$outFile = "transposed-$outFile";
+	}
+	
+	#IN redirection
+	if(!$USE_STDIN)
+   	{
+		open(IN, $file) || die "cannot open $file\n";
+	}
+	else
+	{
+		*IN = *STDIN;
+	}
+
+	my $newFileSizeDelta = 0;
+		
+	#enter this block only if processsing stdin or the file size is lesser than 100MB
+	if ($USE_STDIN || -s $file < 100000000)
+	{
+		if ($verbose)
+		{
+			print "Transposing $file in memory\n";
+		}
+
+		#data variables
+		my @matrix;
+		my $row = 0;
+		my $colNo;
+			
+		while(<IN>)
+		{
+			s/\r?\n?$//;
+			
+			#process first line
+			if ($.==1)
+			{
+				$colNo = s/\t/\t/g + 1;		
+				my @newline = split("\t", $_, $colNo);
+				$matrix[$row++] = \@newline;
+				
+				if($isGt)
+				{
+					$newline[0] = 'snp-id';
+					$newFileSizeDelta = -3;
+				}
+				elsif ($isTg)
+				{
+					$newline[0] = 'sample-id';
+					$newFileSizeDelta = 3;
+				}
+			}
+			else
+			{
+				my @newline = split("\t", $_, $colNo);
+				$matrix[$row++] = \@newline;
+				if($colNo!=scalar(@newline))
+				{
+					print("Row $row does not have the same number of columns as preceding rows\n");
+					print("Row $row :  " . scalar(@newline)  . "\n");
+					print("Preceding rows :  $colNo\n");
+					exit(1);
+				}
+			}
+		}
+	
+		close(IN);
+	
+		#redirect to STDOUT
+		if(!$USE_STDIN)
+		{
+			open(OUT, ">$outFile") || die "cannot open $outFile\n";
+		}
+		else
+		{
+			*OUT = *STDOUT;
+		}
+			
+		#transpose file
+		for (my $col=0; $col<scalar(@{$matrix[0]}); $col++)
+		{
+        	for ($row=0; $row<scalar(@matrix)-1; $row++)
+       		{
+				print OUT "$matrix[$row][$col]\t";	
+       		}
+		
+			print OUT "$matrix[$row][$col]\n";
+		}
+		
+		close(OUT);
+	}
+	else
+	{
+		if ($verbose)
+		{
+			print "Transposing $file in memory and files\n";
+		}
+	
+		#estimates block size to handle
+		my $file_size = -s $file;			
+		
+		#count number of lines in $file
+		my $file_lineno = 0;
+		$file_lineno += tr/\n/\n/ while sysread(IN, $_, 2**16);
+		close(IN);
+	
+		#assumes a uniform distribution of data over each line and
+		#decides how many lines there are in each block
+		my $block_lineno = ceil($file_lineno / ($file_size / 100000000));
+		my $block_no = ceil($file_lineno/$block_lineno); 
+	
+		if($debug)
+		{
+			print("file line no: $file_lineno\n");
+			print("blocks: $block_no\n");
+			print("block line no: $block_lineno\n");
+		}
+		
+		#create a temporary directory in tmp
+		my $temp_dir;
+		#generates a random directory name that does not exist in /tmp
+		#can potentially hang this programme
+		my $dirCreationAttempts = 10;
+		while ($dirCreationAttempts>0)
+		{
+			$temp_dir = "transpose-" . int(rand(1000000));
+
+			if (!(-e $temp_dir)) 
+			{
+				#create directory
+				if (mkdir($temp_dir, 0755))
+				{
+					last;
+				}
+			}
+			
+			$dirCreationAttempts--;
+		}
+		
+		if ($dirCreationAttempts==0)
+		{
+			die "Failure to create temporary directory";
+		}
+		
+		if ($debug)
+		{
+			print("$temp_dir created\n");
+		}
+				
+		open(IN, $file) || die "cannot open $file\n";
+		my $colNo;
+		my $row = 0;
+		my @matrix;
+		my $headerProcessed;
+		
+		while (<IN>)
+		{
+			s/\r?\n?$//;
+
+			if ($verbose && $.%10000==0)
+			{
+				print "processing row $.\n";
+			}
+			
+			#start new file
+			if ($.%$block_lineno==1)
+			{
+				if ($.==1)
+				{
+					#detect number of columns
+					$colNo = s/\t/\t/g + 1;					
+				}
+				#write data in memory to file and clear memory
+				else
+				{
+					#open new file
+					my $new_file = "$temp_dir/" .floor(($.)/$block_lineno) . ".txt";
+					
+					#if fail to open file
+					if(!open(OUT, ">$new_file"))
+					{
+						print STDERR "Cannot open $new_file: $!\n";
+						rmtree($temp_dir, 1, 1);
+						exit(1);
+					}
+				
+					#transpose and write to file
+					my ($i, $j);
+										
+					for ($j=0; $j<scalar(@{$matrix[0]});$j++)
+					{			
+			        	for ($i=0; $i<scalar(@matrix)-1;$i++)
+			       		{
+							print OUT "$matrix[$i][$j]\t";
+			       		}
+					
+						print OUT "$matrix[$i][$j]\n";
+					}
+				
+					close(OUT);
+				}
+				
+				#imply to perl that it should free the !@#$%^&* memory
+				undef(@matrix);
+				@matrix = ();
+
+				$row = 0;
+			}
+
+			my @newline = split("\t", $_, $colNo);
+			if(($isGt || $isTg) && $.==1)
+			{
+				if($newline[0] eq "sample-id")
+				{
+					$newline[0] = "snp-id";
+					$newFileSizeDelta = -3;
+				}
+				elsif ($newline[0] eq "snp-id")
+				{
+					$newline[0] = "sample-id";
+					$newFileSizeDelta = 3;
+				}
+			}
+			$matrix[$row++] = \@newline;
+			if($colNo!=scalar(@newline))
+			{
+				die "Current row does not have the same number of columns(" . scalar(@newline) . ") as preceding rows($colNo)";
+			}
+		}
+				
+		#open new file
+		my $new_file = "$temp_dir/" . ceil(($.)/$block_lineno) . ".txt";
+		
+		#if fail to open file
+		if(!open(OUT, ">$new_file"))
+		{
+			print STDERR "Cannot open $new_file: $!\n";
+			rmtree($temp_dir, 1, 1) || print "Cannot rmtree $temp_dir: $!\n";
+			exit(1);
+		}
+		
+		#transpose and write to file
+		my ($i, $j);
+			
+		for ($j=0; $j<scalar(@{$matrix[0]});$j++)
+		{
+        	for ($i=0; $i<$#matrix;$i++)
+       		{
+				print OUT "$matrix[$i][$j]\t";	
+       		}
+		
+			print OUT "$matrix[$i][$j]\n";
+		}
+		
+		close(IN);			
+		close(OUT);
+
+		undef(@matrix);
+		@matrix = ();
+		
+		#read in separate chunks and combine the files together
+		my @FILE_HANDLES;
+		for (1 .. $block_no)
+		{
+			open($FILE_HANDLES[$_], "$temp_dir/$_.txt") || die "Cannot open $temp_dir/$_.txt\n";
+		}
+
+		open(OUT, ">$outFile") || die "Cannot open $outFile\n";
+		
+		#print over all the lines
+		while ($colNo--)
+		{
+			for my $i (1 .. $#FILE_HANDLES-1)
+			{
+				my $FH = $FILE_HANDLES[$i];
+				$_ = <$FH>;
+				s/\r?\n?$//;
+				print OUT "$_\t";			
+			}
+			
+			my $FH = $FILE_HANDLES[$#FILE_HANDLES];
+			$_ = <$FH>;
+			print OUT $_;
+		}
+		close(OUT);
+
+		#clean up
+		#rmtree($temp_dir, 1, 1);
+		$odir = $temp_dir;
+	}
+	
+	if ($debug) {printf STDERR "$file: %d $outFile: %d delta: %d\n", -s $file, -s $outFile, $newFileSizeDelta;}
+	
+	if (!$USE_STDIN && -s $file != (-s $outFile) - $newFileSizeDelta) {die "Transposition of $file might be corrupted";}
+}
+
+if (defined($odir) && -d $odir)
+{
+	rmtree($odir,1,1);
+}
+
+sub isGt
+{
+	my $file = shift;
+	
+	if($file!~/\.gt$/)
+	{
+		return 0;
+	}
+	
+	open(MY_IN, $file) || die "Cannot open $file";
+	$_ = <MY_IN>;
+	close(MY_IN);
+	s/\r?\n?$//;
+	my @fields = split('\t', $_, 2);
+		
+	if($fields[0] eq 'sample-id')
+	{
+		return 1;
+	}
+	else
+	{
+		return 0;
+	}
+}
+
+sub isTg
+{
+	my $file = shift;
+	
+	if($file!~/\.tg$/)
+	{
+		return 0;
+	}
+	
+	open(MY_IN, $file) || die "Cannot open $file";
+	$_ = <MY_IN>;
+	close(MY_IN);
+	s/\r?\n?$//;
+	my @fields = split('\t', $_, 2);
+		
+	if($fields[0] =~ /(snp-id|marker-id)/)
+	{
+		return 1;
+	}
+	else
+	{
+		return 0;
+	}
+}

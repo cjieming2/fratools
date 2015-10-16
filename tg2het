@@ -1,0 +1,200 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+tg2het
+
+=head1 SYNOPSIS
+
+ tg2het [options] <tg-file>	
+
+  -h help
+  -s sample annotation list (required)	
+     a)sample-id	
+     b)population-id		
+  
+     example: tg2het -s pscalare.sa pscalare.tg
+              
+     Calculates the average heterozygosity from a tg-file.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $saFile;
+my $mkFile;
+my $tgFile;
+my $colNo;
+my %label2col;
+my $ignoreXChromosome;
+my $headerProcessed;
+my $hetFile;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 's=s'=>\$saFile) 
+   || !defined($saFile) || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$tgFile = $ARGV[0];
+isTg($tgFile) || die "$tgFile not a tgfile";
+
+#data structures
+my %SAMPLE;
+
+#read sample annotation file
+open(SA, $saFile) || die "Cannot open $saFile";
+$headerProcessed = 0;
+while(<SA>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+        
+		SEARCH_LABEL: for my $label ('sample-id', 'population-id')
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $label)
+				{			
+					$label2col{$label} = $col;
+					next SEARCH_LABEL;
+				}
+			}
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		if ($colNo!=scalar(@fields))
+		{
+		    die "Current row does not have the same number of columns(" . scalar(@fields) . ") as preceding rows($colNo)";
+        }
+        
+		my $sample = $fields[$label2col{'sample-id'}];
+		my $population = $fields[$label2col{'population-id'}];
+		
+		$SAMPLE{$sample}{POPULATION} = $population;
+	}
+}
+close(SA);
+
+#read genotype file
+open(TG, $tgFile) || die "Cannot open $tgFile";
+$headerProcessed = 0;
+
+my %POPULATION;
+my @sortedPopulations;
+my @col2sample;
+
+if (!defined($hetFile))
+{
+	my($name, $path, $ext) = fileparse($tgFile, '\..*');
+	$hetFile = "$name.het";
+}
+
+open(HET, ">$hetFile") || die "Cannot open $hetFile";
+
+while(<TG>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+        
+		for my $col (1..$#fields)
+		{
+			my $sample = $fields[$col];
+			$col2sample[$col] = $sample;
+			
+			if (!defined($POPULATION{$SAMPLE{$sample}{POPULATION}}))
+			{
+				$POPULATION{$SAMPLE{$sample}{POPULATION}} = ();
+			}
+			
+			push(@{$POPULATION{$SAMPLE{$sample}{POPULATION}}}, $col);
+		}
+		
+		@sortedPopulations = sort(keys(%POPULATION));
+		
+		print HET "snp-id\t" . join("\t", @sortedPopulations) . "\n";
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		if ($colNo!=scalar(@fields))
+		{
+		    die "Current row does not have the same number of columns(" . scalar(@fields) . ") as preceding rows($colNo)";
+        }
+        
+		my $snp = $fields[0];
+		
+		print HET $snp;
+
+		for my $pop (@sortedPopulations)
+		{
+			my $count = 0;
+			my $total = 0;
+			
+			for my $col (@{$POPULATION{$pop}})
+			{
+				my $genotype = $fields[$col];
+				
+				if ($genotype!=-1)
+				{
+				    if ($genotype==1)
+				    {
+				        $count++
+				    }
+
+				    $total++;
+				}
+			}
+			
+			if ($total==0)
+			{
+				print HET "\tn/a";
+				warn "No valid genotypes for $snp";
+			}
+			else
+			{
+				my $paf = $count/$total;
+									
+				printf HET "\t%.4f", $paf;
+			}
+		}
+		
+		print HET "\n";
+	}
+}
+close(TG);

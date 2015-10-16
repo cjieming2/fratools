@@ -1,0 +1,156 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use Getopt::Long;
+use fralib;
+use File::Basename;
+use POSIX qw(ceil floor);
+use File::Path;
+use Pod::Usage;
+
+=head1 NAME
+
+fannotatesnpswithld
+
+=head1 SYNOPSIS
+
+ fannotatesnpswithld 
+    
+  -h           help
+  --ld         hapmap ld file
+  --snp        reference SNP
+  result-file  file name of result file 
+
+ example: fannotatesnpswithld pscalare.mk --ld ld_chr20_ASW.txt --snp rs1234
+  
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $ldFile;
+my $referenceSNP;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions('h'=>\$help, 'ld=s'=>\$ldFile, 'snp=s'=>\$referenceSNP) 
+   || scalar(@ARGV)!=1 || !defined($referenceSNP))
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my $mkFile = $ARGV[0];
+my %SNP_LD;
+my $headerProcessed;
+my %label2Column;
+my $colNo;
+
+#descriptives
+my $totalSNPNo;
+my $totalSNPAnnotated;
+
+open(MK, $mkFile) || die "Cannot open $mkFile";
+open(LD, $ldFile) || die "Cannot open $ldFile";
+my $newMkFile = "ld-annotated-$mkFile";
+open(NEW_MK, ">$newMkFile") || die "Cannot open $newMkFile";
+
+while(<LD>)
+{
+
+    s/\r?\n?$//;
+    
+    #Col1: Chromosomal position of marker1
+    #Col2: chromosomal position of marker2
+    #Col3: population code
+    #Col4: rs# for marker1
+    #Col5: rs# for marker2
+    #Col6: Dprime
+    #Col7: R square
+    #Col8: LOD
+    #Col9: fbin ( index based on Col1 )	
+    #9795 11231 CEU rs4814683 rs6076506 1.0 0.011 0.06 0
+    
+    my @fields = split(/\s/, $_);
+    
+    if ($referenceSNP eq $fields[3])
+    {
+        $SNP_LD{$fields[4]} = $fields[6];
+    }
+    elsif ($referenceSNP eq $fields[4])
+    {
+        $SNP_LD{$fields[3]} = $fields[6];
+    }    
+}
+
+print "read in " . scalar(keys(%SNP_LD)) . " ld values\n";
+$SNP_LD{$referenceSNP} = "1.0";
+       
+close(LD);
+ 		
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+         
+        SEARCH_LABEL: for my $label ('MarkerName')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+
+                die "Cannot find '$label' in $mkFile";
+        }
+        
+        print NEW_MK "$_\trsq\n";
+
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $snpID = $fields[$label2Column{'MarkerName'}];
+
+        my $rsq;
+        if (exists($SNP_LD{$snpID}))
+        {
+            ++$totalSNPAnnotated;
+            $rsq = $SNP_LD{$snpID};
+        } 
+        else
+        {
+            $rsq = 0;
+        }
+                        
+        print NEW_MK "$_\t$rsq\n";
+	    ++$totalSNPNo;
+	} 
+}
+
+close(MK);
+close(NEW_MK);
+
+#print statistics
+print <<STATS;
+Total no. of SNPs                             : $totalSNPNo
+Total no. of annotated SNPs                   : $totalSNPAnnotated
+STATS

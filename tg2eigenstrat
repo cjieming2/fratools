@@ -1,0 +1,193 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use Getopt::Long;
+use File::Basename;
+use Pod::Usage;
+
+=head1 NAME
+
+tg2eigenstrat
+
+=head1 SYNOPSIS
+
+ tg2eigenstrat [options] tgfile	
+	
+  h - help
+  s - list of samples
+      a)sample-id
+      b)affection
+      c)ancestry-coefficient
+
+  IMPORTANT: Assumes the marker x sample genotype file is already in numerical format.
+  5 files will be generated:
+  <genotype-file>.egeno         -  eigenstrat genotype file 
+  <genotype-file>.epheno        -  eigenstrat phenotype file (control:0, case:1)
+  <genotype-file>.egeno.sample  -  list of sample ids in the same order as the genotype file
+  <genotype-file>.egeno.snp     -  list of snp ids in the same order as the genotype file
+  <genotype-file>.pca     -  list of principle components for each individual
+    
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $saFile;
+
+#common variables
+my $colNo;
+my %label2col;
+my $headerProcessed;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 's=s'=>\$saFile)
+	|| !defined($saFile) || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+my $HELIXTREE = 0;
+my $EIGENSTRAT = 1;
+
+my %SA = ();
+
+
+my $tgFile = $ARGV[0];
+if(!isTg($tgFile))
+{
+	die "$tgFile not a .oneg file";
+}
+
+open(SA, $saFile) || die "Cannot open $saFile\n";
+$headerProcessed = 0;
+while (<SA>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+		
+		SEARCH_LABEL: for my $label ('sample-id', 'affection', "ancestry-coefficient")
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $label)
+				{			
+					$label2col{$label}=$col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			die "Cannot find '$label' in $saFile";
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		my $sample = $fields[$label2col{'sample-id'}];
+		my $affection = $fields[$label2col{'affection'}];
+		my $ancestryCoefficient = $fields[$label2col{'ancestry-coefficient'}];
+		
+		#print "$sample\t$affection\t$ancestryCoefficient\n";
+		
+		$SA{$sample}{AFFECTION} = $affection;
+		$SA{$sample}{ANCESTRYCOEFFICIENT} = $ancestryCoefficient;
+	}
+}
+
+close(SA);
+
+my ($name, $path, $ext) = fileparse($tgFile, '\..*?');
+my $outFilePrefix = $name;
+
+open(TG, $tgFile) || die "Cannot open $tgFile\n";
+$headerProcessed = 0;
+open(EIGEN_GENO, ">$outFilePrefix.egeno") || die "Cannot open $outFilePrefix.egeno\n";
+open(EIGEN_GENO_SNP, ">$outFilePrefix.egeno.snp") || die "Cannot open $outFilePrefix.egeno.snp\n";
+
+print EIGEN_GENO_SNP "SNP_ID\n";
+
+while (<TG>)
+{
+	s/\r?\n?$//;
+	
+	if (!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+
+		open(EIGEN_PCA, ">$outFilePrefix.pca") || die "Cannot open $outFilePrefix.epheno\n";
+		print EIGEN_PCA "1\n10\n";
+		
+		open(EIGEN_PHENO, ">$outFilePrefix.epheno") || die "Cannot open $outFilePrefix.epheno\n";
+		open(EIGEN_GENO_SAMPLE, ">$outFilePrefix.egeno.sample") || die "Cannot open $outFilePrefix.egeno.sample\n";
+		print EIGEN_GENO_SAMPLE "SAMPLE_ID\n";
+		
+		for my $col (1 .. $#fields)
+		{
+			my $sampleID = $fields[$col];
+			
+			if(exists($SA{$sampleID}))
+			{
+				if ($SA{$sampleID}{AFFECTION} eq 'case')
+				{
+					print EIGEN_PHENO "1";
+				}
+				elsif ($SA{$sampleID}{AFFECTION} eq 'control')
+				{
+					print EIGEN_PHENO "0";
+				}
+				
+				print EIGEN_PCA "$SA{$sampleID}{ANCESTRYCOEFFICIENT}\n";
+				
+			}
+			else
+			{
+				die "sample $sampleID in TG file not found in SA file";
+			}
+		}
+
+		print EIGEN_PHENO "\n";
+		close(EIGEN_PHENO);
+		close(EIGEN_PCA);
+		close(EIGEN_GENO_SAMPLE);
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		print EIGEN_GENO_SNP "$fields[0]\n";
+		
+		for my $col (1 .. $#fields)
+		{
+			my $genotype = $fields[$col]==-1? 9 : $fields[$col];
+			
+			print EIGEN_GENO $genotype;
+		}
+		
+		print EIGEN_GENO "\n";
+	}
+}
+
+close(TG);
+close(EIGEN_GENO);
+close(EIGEN_GENO_SNP);

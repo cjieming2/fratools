@@ -1,0 +1,935 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX qw{ceil floor};
+
+#my ($x, $y) = getGlobalAlignment("AAATACATTATAAATTAACAGGCATCTTCTCTTTGATATTATTAAATGTACATCTTAAAT", "TTTCAAATACATTATAAATTAACAGGCATCTTCTCTTTGATATTATTAAATGTACATCTT");
+
+#print "AAATACATTATAAATTAACAGGCATCTTCTCTTTGATATTATTAAATGTACATCTTAAAT\n";
+#print "TTTCAAATACATTATAAATTAACAGGCATCTTCTCTTTGATATTATTAAATGTACATCTT\n";
+#print "======\n";
+#print "$x\n$y\n";
+
+#my $w = "AAATACATTATAAATTAACAGGCATCTTCTCTTTGATATTATTAAATGTACATCTTAAAT";
+#my $z = "TTTCAAATACATTATAAATTAACAGGCATCTTCTCTTTGATATTATTAAATGTACATCTT";
+
+#my ($x, $y) = getGlobalAlignment($w, $z);
+
+#print "$z\n";
+#print "$w\n";
+#print "======\n";
+#print "$x\n$y\n";
+
+#exit;
+
+=head1 NAME
+
+fannotatestrands
+
+=head1 SYNOPSIS
+
+ fannotatestrands [options] -g <2bit-file> <mk-file>
+
+  -h        help
+  -s        Alignment Score Cutoff (default: 0.8)
+  -d        Alignment Score Delta Cutoff (default: 0.3)
+  -g        2bit encoding of a genome
+  -p	    print summary of 2bit file
+  -P        print detailed summary of 2bit file
+  mk-file   mk file
+            a)snp-id
+            b)chromosome
+            c)position
+            d)flanks
+ 
+ example: fannotatestrand pscalare.mk -g pscalare.2bit
+          
+ Annotates the strands of flanking sequence based on chromosomal position.
+ Output file is strand-annotated-<mk-file>
+ 
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $mkFile;
+my $twoBitFile;
+my $colNo;
+my $headerProcessed;
+my %CHROM;
+my %META;
+my %SNP;
+my %label2Column;
+my $extractFlanks;
+my $printSummary;
+my $printDetailedSummary;
+my $combined;
+my $chr;
+my $discrepancyCount = 0;
+my $perfectMatchCount = 0;
+my $goodMatchCount = 0;
+my $invalidChromosomeCount = 0;
+my $mismatchCutoff = 4;
+my $mismatchPercentageCutoff = 0.95;
+my $strandAnnotatedMkFile;
+my $goodMatchFile;
+my $discrepancyFile;
+my $alignmentScoreCutoff = 0.8;
+my $alignmentScoreDeltaCutoff = 0.3;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 'g=s'=>\$twoBitFile, 
+                's=f'=>\$alignmentScoreCutoff, 'd=f'=>\$alignmentScoreDeltaCutoff,
+                'p'=>\$printSummary, 'P'=>\$printDetailedSummary, 
+                'c'=>\$combined, 'chrom=s'=>\$chr) 
+   || $alignmentScoreCutoff < 0 || $alignmentScoreCutoff > 1
+   || $alignmentScoreDeltaCutoff < 0 || $alignmentScoreDeltaCutoff > $alignmentScoreCutoff
+   || defined($chr) && ($chr!~/(M|X|Y|1\d|[1-9]|20|21|22)/)
+   || !defined($twoBitFile)
+   || scalar(@ARGV)>1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+$mkFile = $ARGV[0];
+
+open(TWOBIT, $twoBitFile) || die "Cannot open $twoBitFile";
+
+my $value;
+my $bytesRead;
+
+$bytesRead = read(TWOBIT, $value, 4);
+my $signature = unpack('L', $value);
+$bytesRead = read(TWOBIT, $value, 4);
+my $version = unpack('L', $value);
+$bytesRead = read(TWOBIT, $value, 4);
+my $sequenceCount = unpack('L', $value);
+$bytesRead = read(TWOBIT, $value, 4);
+my $reserved = unpack('L', $value);
+
+$META{SIGNATURE} = $signature;
+$META{VERSION} = $version;
+$META{SEQUENCE_COUNT} = $sequenceCount;
+$META{RESERVED} = $reserved;
+
+for (1 .. $sequenceCount)
+{
+	$bytesRead = read(TWOBIT, $value, 1);
+	my $nameLength = vec($value,0,8);
+	$bytesRead = read(TWOBIT, $value, $nameLength);
+	my $name = unpack("A$nameLength",$value);
+	$bytesRead = read(TWOBIT, $value, 4);
+	my $offset = unpack('L', $value);
+	
+	#>gi|17981852|ref|NC_001807.4| Homo sapiens mitochondrion, complete genome
+
+	if($name=~/NC_0+(\d+)/)
+	{
+		if($1==23)
+		{
+			$CHROM{X}{OFFSET} = $offset;
+			$CHROM{X}{NAME} = $name;
+		}
+		elsif ($1==24)
+		{
+			$CHROM{Y}{OFFSET} = $offset;
+			$CHROM{Y}{NAME} = $name;
+		}
+		elsif ($1==1807)
+		{
+			$CHROM{M}{OFFSET} = $offset;
+			$CHROM{M}{NAME} = $name;
+		}
+		elsif ($1<=22 && $1>=1)
+		{
+			$CHROM{$1}{OFFSET} = $offset;
+			$CHROM{$1}{NAME} = $name;
+		}
+		else
+		{
+			die "Unidentified chromosome: $1";
+		}
+	}
+}
+
+for my $chrom (sort(keys(%CHROM)))
+{
+	seek(TWOBIT, $CHROM{$chrom}{OFFSET}, 0);
+	
+	$bytesRead = read(TWOBIT, $value, 4);
+	my $dnaSize = unpack('L', $value);
+	$bytesRead = read(TWOBIT, $value, 4);
+	my $unknownBlockCount = unpack('L', $value);
+	
+	my @unknownBlockStart = ();
+	my @unknownBlockSize = ();
+	my @maskedBlockStart = ();
+	my @maskedBlockSize = ();
+			
+	for (1 .. $unknownBlockCount)
+	{
+		$bytesRead = read(TWOBIT, $value, 4);
+		push(@unknownBlockStart, unpack('L', $value));
+	}
+	
+	for (1 .. $unknownBlockCount)
+	{
+		$bytesRead = read(TWOBIT, $value, 4);
+		push(@unknownBlockSize, unpack('L', $value));
+	}
+	
+	$bytesRead = read(TWOBIT, $value, 4);
+	my $maskedBlockCount = unpack('L', $value);
+	
+	for (1 .. $maskedBlockCount)
+	{
+		$bytesRead = read(TWOBIT, $value, 4);
+		push(@maskedBlockStart, unpack('L', $value));
+	}
+	
+	for (1 .. $maskedBlockCount)
+	{
+		$bytesRead = read(TWOBIT, $value, 4);
+		push(@maskedBlockSize, unpack('L', $value));
+	}
+
+	$bytesRead = read(TWOBIT, $value, 4);
+	my $reservedWord = unpack('L', $value);
+
+	$CHROM{$chrom}{SIZE} = $dnaSize;
+	$CHROM{$chrom}{UNKNOWN_BLOCK_NO} = $unknownBlockCount;
+	$CHROM{$chrom}{UNKNOWN_START} = \@unknownBlockStart;
+	$CHROM{$chrom}{UNKNOWN_SIZE} = \@unknownBlockSize;
+	$CHROM{$chrom}{MASKED_BLOCK_NO} = $maskedBlockCount;
+	$CHROM{$chrom}{MASKED_START} = \@maskedBlockStart;
+	$CHROM{$chrom}{MASKED_SIZE} = \@maskedBlockSize;
+	$CHROM{$chrom}{RESERVED_WORD} = $reservedWord;			
+
+	#combine blocks in order
+	my $combinedBlockCount = $unknownBlockCount + $maskedBlockCount;
+	my @combinedBlockStart;
+	my @combinedBlockSize;
+	map {push(@combinedBlockStart, $_)} @unknownBlockStart;
+	map {push(@combinedBlockSize, $_)} @unknownBlockSize;
+	
+	for my $i (0 .. $#maskedBlockStart)
+	{
+		for my $j (0 .. $#combinedBlockStart)
+		{
+			if ($maskedBlockStart[$i]<$combinedBlockStart[$j])
+			{
+				splice(@combinedBlockStart, $j, 0, $maskedBlockStart[$i]);
+				splice(@combinedBlockSize, $j, 0, $maskedBlockSize[$i]);
+				last;
+			}
+			elsif ($j==$#combinedBlockStart)
+			{
+				push(@combinedBlockStart, $maskedBlockStart[$i]);
+				push(@combinedBlockSize, $maskedBlockSize[$i]);
+			}
+		}
+	}
+	
+	$CHROM{$chrom}{COMBINED_BLOCK_NO} = $combinedBlockCount;
+	$CHROM{$chrom}{COMBINED_START} = \@combinedBlockStart;
+	$CHROM{$chrom}{COMBINED_SIZE} = \@combinedBlockSize;	
+}
+
+#prints out results
+if ($printSummary || $printDetailedSummary)
+{
+	print "Summary for $twoBitFile\n\n";
+	printf "Signature: %x\n", $META{SIGNATURE};
+	printf "Version: %d\n", $META{VERSION};
+	printf "Sequence Count: %d\n", $META{SEQUENCE_COUNT};
+	printf "Reserved: %d\n\n", $META{RESERVED};
+
+$META{SIGNATURE} = $signature;
+$META{VERSION} = $version;
+$META{SEQUENCE_COUNT} = $sequenceCount;
+$META{RESERVED} = $reserved;
+
+	for my $chrom (sort {if ("$a$b"=~/\D/) {$a cmp $b} else {$a <=> $b}} keys(%CHROM))
+	{
+		if(!defined($chr) || $chr eq $chrom)
+		{
+			print <<REPORT;
+=============
+Chromosome $chrom
+=============
+Name:   $CHROM{$chrom}{NAME}
+Offset: $CHROM{$chrom}{OFFSET}
+Size:   $CHROM{$chrom}{SIZE}
+	
+REPORT
+			
+			if($printDetailedSummary)
+			{
+				if (!$combined)
+				{
+					print "Unknown Blocks ($CHROM{$chrom}{UNKNOWN_BLOCK_NO})\n";
+					for my $i (1 .. $CHROM{$chrom}{UNKNOWN_BLOCK_NO})
+					{
+						printf "%2d) %9d %9d\n", $i, ${$CHROM{$chrom}{UNKNOWN_START}}[$i-1], ${$CHROM{$chrom}{UNKNOWN_SIZE}}[$i-1];
+					}
+					
+					print "\nMasked Blocks ($CHROM{$chrom}{MASKED_BLOCK_NO})\n";
+					for my $i (1 .. $CHROM{$chrom}{MASKED_BLOCK_NO})
+					{
+						printf "%2d) %9d %9d\n", $i, ${$CHROM{$chrom}{MASKED_START}}[$i-1], ${$CHROM{$chrom}{MASKED_SIZE}}[$i-1];
+					}
+				}
+				else
+				{
+					print "Unknown Blocks ($CHROM{$chrom}{UNKNOWN_BLOCK_NO})\n";
+					print "Masked Blocks ($CHROM{$chrom}{MASKED_BLOCK_NO})\n";
+					print "Combined Blocks ($CHROM{$chrom}{COMBINED_BLOCK_NO})\n";
+					for my $i (1 .. $CHROM{$chrom}{COMBINED_BLOCK_NO})
+					{
+						printf "%2d) %9d %9d\n", $i, ${$CHROM{$chrom}{COMBINED_START}}[$i-1], ${$CHROM{$chrom}{COMBINED_SIZE}}[$i-1];
+					}
+				}
+			}
+		}
+	}
+}
+
+exit if (scalar(@ARGV) == 0);
+
+open(MK, $mkFile) || die "Cannot open $mkFile";
+$headerProcessed = 0;
+
+my($name, $path, $ext) = fileparse($mkFile, '\..*');
+$strandAnnotatedMkFile = "strand-annotated-$name.mk";
+open(STRAND_ANNOTATED_MK, ">$strandAnnotatedMkFile") || die "Cannot open $strandAnnotatedMkFile\n";
+$goodMatchFile = "$name-good-match.log";
+open(GOOD_MATCH, ">$goodMatchFile") || die "Cannot open $goodMatchFile\n";
+$discrepancyFile = "$name-discrepancy.log";
+open(DISCREPANCY, ">$discrepancyFile") || die "Cannot open $discrepancyFile\n";
+
+while(<MK>)
+{
+    s/\r?\n?$//;
+    
+    if(!$headerProcessed)
+    {
+        $colNo = s/\t/\t/g + 1;
+        
+        my @fields = split('\t', $_, $colNo);
+        
+        SEARCH_LABEL: for my $label('snp-id', 'chromosome', 'position', 'flanks')
+        {
+            for my $col (0 .. $#fields)
+            {
+                if ($fields[$col] eq $label)
+                {           
+                    $label2Column{$label}=$col;
+                    next SEARCH_LABEL;
+                }
+            }
+        
+            if ($label eq 'flanks')
+            {
+                $extractFlanks = 1;
+            }
+            else
+            {
+                die "Cannot find '$label' in $mkFile";
+            }
+        }
+        
+        #print contents of old mk file		
+		for my $col (0 .. $#fields)
+		{
+			my $label = $fields[$col];
+			
+			if ($label eq 'strand')
+			{			
+				print STRAND_ANNOTATED_MK "old-strand\t";
+			}
+			elsif ($label eq 'flanks')
+			{			
+				#don't print
+			}
+			else
+			{
+				print STRAND_ANNOTATED_MK "$label\t";
+			}
+		}
+		
+		print STRAND_ANNOTATED_MK "strand\tflanks\n";
+        
+        $headerProcessed = 1;
+    }
+    else
+    {
+        my @fields = split('\t', $_, $colNo);
+        my $snpID = $fields[$label2Column{'snp-id'}];
+        my $chromosome = $fields[$label2Column{'chromosome'}];
+        #my $strand = $fields[$label2Column{'strand'}];
+        my $position = $fields[$label2Column{'position'}];
+        my $flanks;
+             
+        #add for hapmap
+        if($extractFlanks)
+        {
+            die "Extraction of flanks not implemented";
+        }
+        else
+        {
+            $flanks = uc($fields[$label2Column{'flanks'}]);
+            
+            my $fivePrimeLength;
+        	my $threePrimeLength;
+        	my $queryStart;
+        	my $queryEnd;
+   	        my $annotatedStrand;
+        	
+        	#Checks if chromosome is found in 2bit file
+        	if(!exists($CHROM{$chromosome}))
+            {
+                unless($chromosome eq 'n/a')
+                {
+                    warn "Chromosome $chromosome not in 2bit file";
+                }              
+                
+                $annotatedStrand = 'n/a';
+			    ++$invalidChromosomeCount;
+			    goto PRINT_ROW_LABEL;
+            }
+
+            #Ensures flanks are valid
+        	unless ($flanks=~/([ACGTMRWSYKVHDBNX]*)\[([ACGT]\/[ACGT]|[ACGT]+\/-|-\/[ACGT]+)\]([ACGTMRWSYKVHDBNX]*)/i
+        	    && (length($1)!=0 || length($3)!=0)) #flanks rejected if both arms are zero length
+			{
+				die "flanks has issues: $flanks";
+			}
+            
+    	    ##################
+    	    #EXTRACT SEQUENCE#
+    	    ##################
+    	    #calculate length of sequence to extract for comparison
+    		$fivePrimeLength = max(length($1),length($3));
+    		$threePrimeLength = $fivePrimeLength;
+    		
+    		#zero based coordinates
+    		$queryStart = max($position - $fivePrimeLength, 1) - 1;
+    		$queryEnd = $queryStart + $fivePrimeLength + $threePrimeLength;
+
+			my $offset = $CHROM{$chromosome}{OFFSET} + 16 + 
+			            ($CHROM{$chromosome}{UNKNOWN_BLOCK_NO}+$CHROM{$chromosome}{MASKED_BLOCK_NO}) * 8;
+			
+			my $readStart = floor($queryStart/4);
+			my $extraFivePrimeBases = $queryStart%4;
+			#my $readLength = ceil(($queryEnd-$queryStart+1)/4);
+			my $readLength = ((ceil($queryEnd/4)*4) - (floor($queryStart/4)*4)) / 4;
+			my $extraThreePrimeBases = 4*$readLength - ($queryEnd-$queryStart+1) - $extraFivePrimeBases;
+			my $snpBasePosition = $fivePrimeLength + $extraFivePrimeBases + 1;
+			
+			my $sequence;
+			my $extractedFlanks = '';
+			seek(TWOBIT, $offset + $readStart, 0) || die "Cannot seek in $twoBitFile";
+			read(TWOBIT, $sequence, $readLength) || die "Cannot read $twoBitFile";
+			
+			my $baseNo = 0;
+			
+			for my $b (0 .. $readLength-1)
+			{
+				#silly little endian convention by !@#$ vec()
+				for my $i (0 .. 3)
+				{
+					++$baseNo;
+					if($baseNo>$extraFivePrimeBases && $baseNo<=$readLength*4-$extraThreePrimeBases)
+					{
+						my $base = translate(vec($sequence, $b*4+(3-$i), 2));
+						
+						if($baseNo == $snpBasePosition)
+						{
+							$extractedFlanks .= "[$base/ ]";
+						}
+						else
+						{
+							$extractedFlanks .= $base;
+						}
+					}
+				}
+			}
+		    
+		    if (0)
+			{
+				print "snpid: $snpID\n";        	
+	        	print "chromosome: $chromosome\n";
+	        	print "position: $position\n";
+        		print "    chr$chromosome:$queryStart-$queryEnd\n";  
+				print "    read start: $readStart\n";
+				print "    read length: $readLength\n";
+				print "    5 extra: $extraFivePrimeBases\n";
+				print "    3 extra: $extraThreePrimeBases\n";
+				print "    xflanks:      $extractedFlanks\n";
+				print "    flanks:       $flanks\n";
+			}
+				
+    		#fill up known and masked sequence
+    		for my $i (0 .. $CHROM{$chromosome}{COMBINED_BLOCK_NO}-1)
+    		{
+    			my $blockStart = ${$CHROM{$chromosome}{COMBINED_START}}[$i]-1;
+    			my $blockEnd = $blockStart + ${$CHROM{$chromosome}{COMBINED_SIZE}}[$i] - 1;
+    			
+    			if ($blockEnd>=$queryStart && $blockStart<=$queryEnd)
+    			{
+    			    print "$extractedFlanks\n";
+    				warn "time to write code to fill up unknown/masked portions of the query sequence - thanks... : $snpID\@chr$chromosome:$queryStart-$queryEnd";
+    			}
+    		}
+
+    	    ######################
+    	    #CALCULATE SIMILARITY#
+    	    ######################		
+			my $similarity = 0;
+			my $rcSimilarity = 0;
+			
+			my $rcFlanks;
+			
+			$similarity = getFlanksSimilarity($extractedFlanks, $flanks);
+                                
+            if($similarity==1)
+			{
+			    if (0)
+				{
+					print "snpid: $snpID\n";        	
+		        	#print "chromosome: $chromosome\n";
+		        	#print "position: $position\n";
+	        		#print "    chr$chromosome:$queryStart-$queryEnd\n";  
+					#print "    read start: $readStart\n";
+					#print "    read length: $readLength\n";
+					#print "    5 extra: $extraFivePrimeBases\n";
+					#print "    3 extra: $extraThreePrimeBases\n";
+					print "    xflanks:      $extractedFlanks\n";
+					print "    flanks:       $flanks\n";
+					print "    similarity:   $similarity\n";
+					print "    Perfect Match\n";
+				}
+			    $annotatedStrand = '+';
+			    ++$perfectMatchCount;
+			    goto PRINT_ROW_LABEL;
+			}
+
+		    $rcFlanks = reverseComplementFlanks($flanks);
+		    $rcSimilarity = getFlanksSimilarity($extractedFlanks, $rcFlanks);
+		    
+		    if ($rcSimilarity==1)
+		    {
+			    if (0)
+				{
+					print "snpid: $snpID\n";        	
+					print "    xflanks:      $extractedFlanks\n";
+					print "    flanks:       $flanks\n";
+					print "    similarity:   $similarity\n";
+					print "    rcflanks:     $rcFlanks\n";
+	        		print "    rcsimilarity: $rcSimilarity\n";
+					print "    Perfect Match\n";
+				}
+				
+			    $annotatedStrand = '-';
+			    ++$perfectMatchCount;
+			    goto PRINT_ROW_LABEL;
+		    }
+
+            #print "I1: $extractedFlanks, $flanks\n";
+            #print "I2: $extractedFlanks, $rcFlanks\n";     
+    		my ($alignmentScore, $alignedExtractedFlanks1, $alignedFlanks) = getAlignedFlanksSimilarity($extractedFlanks, $flanks);         
+            my ($rcAlignmentScore, $alignedExtractedFlanks2, $alignedReverseComplementFlanks) = getAlignedFlanksSimilarity($extractedFlanks, $rcFlanks);
+            #print "O1: $alignedExtractedFlanks1, $alignedFlanks\n";
+            #print "O2: $alignedExtractedFlanks2, $alignedReverseComplementFlanks\n";
+            
+            #if ($alignmentScore<$alignmentScoreCutoff xor $rcAlignmentScore<$alignmentScoreCutoff)
+	        if (($alignmentScore<$alignmentScoreCutoff xor $rcAlignmentScore<$alignmentScoreCutoff) && abs($alignmentScore-$rcAlignmentScore) > $alignmentScoreDeltaCutoff)
+	        {
+	            $annotatedStrand = $alignmentScore > $rcAlignmentScore ? '+' : '-';
+	            ++$goodMatchCount;
+
+    			if (1)
+    			{
+    				print GOOD_MATCH "snpid: $snpID\n";        	
+    				print GOOD_MATCH "    xflanks:         $extractedFlanks\n";
+    				print GOOD_MATCH "    flanks:          $flanks\n";
+    				print GOOD_MATCH "    rcflanks:        $rcFlanks\n";
+    				print GOOD_MATCH "    alignedxflanks1: $alignedExtractedFlanks1\n";
+    				print GOOD_MATCH "    alignedflanks:   $alignedFlanks\n";
+    				print GOOD_MATCH "    alignedxflanks2: $alignedExtractedFlanks2\n";
+    				print GOOD_MATCH "    alignedrcflanks: $alignedReverseComplementFlanks\n";
+    				print GOOD_MATCH "    similarity:      $similarity\n";
+    				print GOOD_MATCH "    score:           $alignmentScore\n";
+            		print GOOD_MATCH "    rcsimilarity:    $rcSimilarity\n";
+    				print GOOD_MATCH "    rcscore:         $rcAlignmentScore\n";
+    				print GOOD_MATCH "    Good Match\n";
+    			}
+	        }
+	        else
+			{
+			    $annotatedStrand = 'n/a';
+			    ++$discrepancyCount;
+			    
+			    if (1)
+    			{
+    				print DISCREPANCY "snpid: $snpID\n";        	
+    				print DISCREPANCY "    xflanks:         $extractedFlanks\n";
+    				print DISCREPANCY "    flanks:          $flanks\n";
+    				print DISCREPANCY "    rcflanks:        $rcFlanks\n";
+    				print DISCREPANCY "    alignedxflanks1: $alignedExtractedFlanks1\n";
+    				print DISCREPANCY "    alignedflanks:   $alignedFlanks\n";
+    				print DISCREPANCY "    alignedxflanks2: $alignedExtractedFlanks2\n";
+    				print DISCREPANCY "    alignedrcflanks: $alignedReverseComplementFlanks\n";
+    				print DISCREPANCY "    similarity:      $similarity\n";
+    				print DISCREPANCY "    score:           $alignmentScore\n";
+            		print DISCREPANCY "    rcsimilarity:    $rcSimilarity\n";
+    				print DISCREPANCY "    rcscore:         $rcAlignmentScore\n";
+    				print DISCREPANCY "    Discrepancy\n";
+    			}
+			}
+			
+    		#print contents of old mk file
+    		PRINT_ROW_LABEL: 
+    		
+    		my $flanksFieldNo = $label2Column{'flanks'};
+    		
+    		for my $col (0 .. $#fields)
+    		{			
+    			if ($col == $flanksFieldNo)
+    			{
+    				#don't print
+    			}
+    			else
+    			{
+    				print STRAND_ANNOTATED_MK "$fields[$col]\t";
+    			}
+    		}
+    		
+    		print STRAND_ANNOTATED_MK "$annotatedStrand\t$flanks\n";
+		}
+    }
+}
+
+print "Alignment Score Cutoff: $alignmentScoreCutoff\n";
+print "Alignment Score Delta Cutoff: $alignmentScoreDeltaCutoff\n";
+print "Perfect Match Counts: $perfectMatchCount\n";
+print "Good Match Counts: $goodMatchCount\n";
+print "Discrepancy Counts: $discrepancyCount\n";
+print "Invalid Chromosome Counts: $invalidChromosomeCount\n";
+
+close(MK);
+close(STRAND_ANNOTATED_MK);
+close(TWOBIT);
+
+sub translate
+{
+	my $base = shift;
+	
+	if ($base==0x0)
+	{
+		return 'T';
+	}
+	elsif ($base==0x1)
+	{
+		return 'C';
+	}
+	elsif ($base==0x2)
+	{
+		return 'A';
+	}
+	elsif ($base==0x3)
+	{
+		return 'G';
+	}	
+}
+
+#checks similarity of flanks
+# <========[variation]========>
+sub getFlanksSimilarity
+{
+	my ($flank1, $flank2) = @_;
+	
+	my @oneFivePrime;
+	my @oneThreePrime;
+
+	my @twoFivePrime;
+	my @twoThreePrime;
+		
+	if ($flank1=~/([ACGTMRWSYKVHDBNX]*)\[.+\]([ACGTMRWSYKVHDBNX]*)/i)
+	{
+		@oneFivePrime = reverse(split(//, $1));
+		@oneThreePrime = split(//, $2);
+	}
+
+	if ($flank2=~/([ACGTMRWSYKVHDBNX]*)\[.+\]([ACGTMRWSYKVHDBNX]*)/i)
+	{
+		@twoFivePrime = reverse(split(//, $1));
+		@twoThreePrime = split(//, $2);
+	}
+
+	my $totalFivePrimeBases = min($#oneFivePrime, $#twoFivePrime)+ 1;
+	my $fivePrimeConcordance = $totalFivePrimeBases;
+
+	#compare five prime
+	for my $i (0 .. $totalFivePrimeBases - 1)
+	{
+		if ($oneFivePrime[$i] ne $twoFivePrime[$i])
+		{
+			if (!baseMatch($oneFivePrime[$i],$twoFivePrime[$i]))
+			{
+				--$fivePrimeConcordance;
+			}
+		}
+	}
+	
+	my $totalThreePrimeBases = min($#oneThreePrime, $#twoThreePrime) + 1;
+	my $threePrimeConcordance = $totalThreePrimeBases;
+					
+	#compare three prime
+	for my $i (0 .. $totalThreePrimeBases - 1)
+	{
+		if ($oneThreePrime[$i] ne $twoThreePrime[$i])
+		{
+			if (!baseMatch($oneThreePrime[$i],$twoThreePrime[$i]))
+			{
+				--$threePrimeConcordance;
+			}
+		}
+	}
+	
+	return $totalFivePrimeBases + $totalThreePrimeBases == 0 ? 0 : ($fivePrimeConcordance + $threePrimeConcordance) / ($totalFivePrimeBases + $totalThreePrimeBases);
+}
+
+#checks similarity of flanks via alignments
+# <========[variation]========>
+sub getAlignedFlanksSimilarity
+{
+	my ($flank1, $flank2) = @_;
+	
+	my @oneFivePrime;
+	my @oneThreePrime;
+
+	my @twoFivePrime;
+	my @twoThreePrime;
+
+    my $oneSNP;
+    my $twoSNP;
+
+	if ($flank1=~/([ACGTMRWSYKVHDBNX]*)(\[.+\])([ACGTMRWSYKVHDBNX]*)/i)
+	{
+		@oneFivePrime = reverse(split(//, $1));
+		$oneSNP = $2;
+		@oneThreePrime = split(//, $3);
+	}
+
+	if ($flank2=~/([ACGTMRWSYKVHDBNX]*)(\[.+\])([ACGTMRWSYKVHDBNX]*)/i)
+	{
+		@twoFivePrime = reverse(split(//, $1));
+		$twoSNP = $2;
+		@twoThreePrime = split(//, $3);
+	}
+	
+	my $totalFivePrimeBases = min($#oneFivePrime, $#twoFivePrime);
+    my ($oneFivePrimeAlignment, $twoFivePrimeAlignment) = getGlobalAlignment(substr(join("", @oneFivePrime),0,scalar(@oneFivePrime)), substr(join("", @twoFivePrime),0,scalar(@twoFivePrime)));
+
+	my $totalThreePrimeBases = min($#oneThreePrime, $#twoThreePrime);
+    my ($oneThreePrimeAlignment, $twoThreePrimeAlignment) = getGlobalAlignment(substr(join("", @oneThreePrime),0,scalar(@oneThreePrime)), substr(join("", @twoThreePrime),0,scalar(@twoThreePrime)));
+
+	my @oneFivePrimeAlignment = split(//, $oneFivePrimeAlignment);
+	my @twoFivePrimeAlignment = split(//, $twoFivePrimeAlignment);
+	my @oneThreePrimeAlignment = split(//, $oneThreePrimeAlignment);
+	my @twoThreePrimeAlignment = split(//, $twoThreePrimeAlignment);
+	
+    my $total = 0;
+    my $concordance = 0;
+    my $gapCount = 0;
+    for my $i (0 .. $#oneFivePrimeAlignment)
+    {
+        if ($oneFivePrimeAlignment[$i] ne '-' && $twoFivePrimeAlignment[$i] ne '-')
+        {
+            ++$concordance if ($oneFivePrimeAlignment[$i] eq $twoFivePrimeAlignment[$i]);
+            ++$total;
+        }
+        else
+        {
+            ++$gapCount;
+        }        
+    }
+
+    for my $i (0 .. $#oneThreePrimeAlignment)
+    {
+        if ($oneThreePrimeAlignment[$i] ne '-' && $twoThreePrimeAlignment[$i] ne '-')
+        {
+            ++$concordance if ($oneThreePrimeAlignment[$i] eq $twoThreePrimeAlignment[$i]);
+            ++$total;
+        }
+        else
+        {
+            ++$gapCount;
+        }
+    }
+    
+    my $similarity = $total == 0 ? 0 : $concordance/$total;
+    
+    my $alignedSequence1 = join("", reverse(@oneFivePrimeAlignment)) . $oneSNP . join("", @oneThreePrimeAlignment);
+    my $alignedSequence2 = join("", reverse(@twoFivePrimeAlignment)) . $twoSNP . join("", @twoThreePrimeAlignment);
+        
+    return ($similarity, $alignedSequence1, $alignedSequence2);
+}
+
+#align 2 sequences
+sub getGlobalAlignment
+{
+    my ($sequence1, $sequence2) = @_;
+    
+    my @seq1 = split(//, $sequence1);
+    my @seq2 = split(//, $sequence2);
+    
+    my @scoreMatrix = ();
+    my @traceMatrix = ();
+    
+    #initialize borders
+    $scoreMatrix[0][0] = 0;  
+    $traceMatrix[0][0] = 'E';
+    for my $i (1 .. scalar(@seq1))
+    {
+    	$scoreMatrix[0][$i] = -$i;
+    	$traceMatrix[0][$i] = 'L';
+    }
+    for my $j (1 .. scalar(@seq2))
+    {
+    	$scoreMatrix[$j][0] = -$j;
+    	$traceMatrix[$j][0] = 'U';
+    }
+    
+    #score
+    for my $j (1 .. scalar(@seq2))
+    {
+    	for my $i (1 .. scalar(@seq1))
+	    {
+	    	my $delta = $seq1[$i-1] eq $seq2[$j-1] ? 1 : 0;
+	    	
+	    	my $diag = $scoreMatrix[$j-1][$i-1] + $delta;
+	    	my $up   = $scoreMatrix[$j-1][$i] - 1;
+	    	my $left = $scoreMatrix[$j][$i-1] - 1;
+	    	
+	    	$scoreMatrix[$j][$i] = $up;
+	    	$scoreMatrix[$j][$i] = $up<$left ? $left : $up;
+	    	$scoreMatrix[$j][$i] = $scoreMatrix[$j][$i]<=$diag ? $diag : $scoreMatrix[$j][$i];
+
+	    	$traceMatrix[$j][$i] = 'U';
+	    	$traceMatrix[$j][$i] = $up<$left ? 'L' : 'U';
+	    	$traceMatrix[$j][$i] = $scoreMatrix[$j][$i]<=$diag ? 'D' : $traceMatrix[$j][$i];
+
+	    	#$scoreMatrix[$j][$i] = $diag;
+	    	#$scoreMatrix[$j][$i] = $diag<$up ? $up : $diag;
+	    	#$scoreMatrix[$j][$i] = $scoreMatrix[$j][$i]<=$left ? $left : $scoreMatrix[$j][$i];
+
+	    	#$traceMatrix[$j][$i] = 'D';
+	    	#$traceMatrix[$j][$i] = $diag<$up ? 'U' : 'D';
+	    	#$traceMatrix[$j][$i] = $scoreMatrix[$j][$i]<=$left ? 'L' : $traceMatrix[$j][$i];
+	    }
+    }    
+    
+    my ($alignment1, $alignment2) = ("", "");    
+    my $i = scalar(@seq1);
+    my $j = scalar(@seq2);
+    
+    while ($i!=0 || $j!=0)
+    {
+    	if ($traceMatrix[$j][$i] eq 'D')
+    	{
+    		$alignment1 = $seq1[$i-1] . $alignment1;
+    		$alignment2 = $seq2[$j-1] . $alignment2;
+    		--$i;
+    		--$j;
+    	}
+    	elsif ($traceMatrix[$j][$i] eq 'U')
+    	{
+    		$alignment1 = '-' . $alignment1;
+    		$alignment2 = $seq2[$j-1] . $alignment2;
+    		--$j;
+    	}
+    	elsif ($traceMatrix[$j][$i] eq 'L')
+    	{
+    		$alignment1 = $seq1[$i-1] . $alignment1;
+    		$alignment2 = '-' . $alignment2;
+    		--$i;
+    	}
+    }
+    
+    #trace matrices
+    if(0)
+    {
+        for my $j (0 .. scalar(@seq2))
+        {
+        	for my $i (0 .. scalar(@seq1))
+    	    {
+    	        printf "\t%3d|%1s", $scoreMatrix[$j][$i], $traceMatrix[$j][$i];
+    	    }
+    	    
+    	    print "\n";
+    	}
+    }
+    
+       
+    return ($alignment1, $alignment2);
+}
+
+#returns the reverse complement of a flank
+#i.e. ACGATCAGCTAAGCTCAG[A/G]ACGTGVTGATGCGT
+sub reverseComplementFlanks
+{
+	my $flanks = shift;
+	
+	my @newFlanks = ();
+	
+	for my $base (split(//, $flanks))
+	{
+		unshift(@newFlanks, flankComplement($base));
+	}
+	
+	return join("", @newFlanks);
+}
+
+#an auxiliary function that adds complements to extra symbols found in a flanking sequence
+sub flankComplement
+{
+	my $base = shift;
+	
+    if ($base eq '[')
+	{
+		return ']';
+	}
+	elsif ($base eq ']')
+	{
+		return '[';
+	}	
+	elsif ($base eq '/')
+	{
+		return $base;
+	}
+	elsif ($base eq '-')
+	{
+		return $base;
+	}
+	else
+	{
+		return complementBase($base);
+	}
+}

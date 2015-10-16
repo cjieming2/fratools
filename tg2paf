@@ -1,0 +1,340 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+use fralib;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+=head1 NAME
+
+tg2paf
+
+=head1 SYNOPSIS
+
+ tg2paf [options] tg-file	
+
+  -h help
+  -s sample annotation list (required)	
+     a)sample-id	
+     b)population-id or population-abbreviation
+     c)sex (optional)		
+  
+  -m mk-file (optional)	
+     a)snp-id	
+     b)chromosome	
+     treats all SNPs as autosomal SNPs if this list is not present
+
+  -p alternative column name (optional) 
+     toggle the option to use population-abbreviation instead of 
+     population-id for population identification;
+     0 for population-id (default), 1 for population-abbreviation
+  
+    example: tg2paf -p 1 -s pscalare.sa pscalare.tg
+
+    Calculates the population allele frequencies from a tgfile.
+       
+=head1 DESCRIPTION
+
+=cut
+
+#option variables
+my $help;
+my $saFile;
+my $mkFile;
+my $tgFile;
+my $colNo;
+my %label2col;
+my $ignoreXChromosome = 0;
+my $headerProcessed;
+my $pafFile;
+my $popabbrev = 0;
+my $popcol;
+
+#initialize options
+Getopt::Long::Configure ('bundling');
+
+if(!GetOptions ('h'=>\$help, 's=s'=>\$saFile, 'm=s'=>\$mkFile, 'p=i'=>\$popabbrev) 
+   || !defined($saFile) || scalar(@ARGV)!=1)
+{
+    if ($help)
+    {
+        pod2usage(-verbose => 2);
+    }
+    else
+    {
+        pod2usage(1);
+    }
+}
+
+# to toggle between pop-abbrev and pop-id
+if ($popabbrev)
+{
+	$popcol = 'population-abbreviation';
+}
+else
+{
+	$popcol = 'population-id';
+}
+
+
+$tgFile = $ARGV[0];
+isTg($tgFile) || die "$tgFile not a tgfile";
+
+#data structures
+my %SAMPLE;
+my %SNP;
+
+#read sample annotation file
+open(SA, $saFile) || die "Cannot open $saFile";
+$headerProcessed = 0;
+while(<SA>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+        
+		SEARCH_LABEL: for my $label ('sample-id', $popcol, 'sex')
+		{
+			for my $col (0 .. $#fields)
+			{
+				if ($fields[$col] eq $label)
+				{			
+					$label2col{$label} = $col;
+					next SEARCH_LABEL;
+				}
+			}
+			
+			#'gender' annotation is optional 
+			if($label ne 'sex')
+			{
+				die "Cannot find '$label' in $saFile";
+			}
+			#ignore gender
+			else
+			{
+			    if(defined($mkFile))
+			    {
+			        warn "Marker file will be ignored as sex infomation is unavailable in $saFile";  
+			    }
+
+			    $ignoreXChromosome = 1;
+			}
+		}
+		
+	    if (!$ignoreXChromosome && !defined($mkFile))
+		{
+		    warn "Sex information will be ignored as mk-file is not supplied";
+		    $ignoreXChromosome = 1;
+		}
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		if ($colNo!=scalar(@fields))
+		{
+		    die "Current row does not have the same number of columns(" . scalar(@fields) . ") as preceding rows($colNo)";
+        }
+        
+		my $sample = $fields[$label2col{'sample-id'}];
+		my $population = $fields[$label2col{$popcol}];
+		
+		$SAMPLE{$sample}{POPULATION} = $population;
+		if(!$ignoreXChromosome)
+		{
+			$SAMPLE{$sample}{SEX} = $fields[$label2col{'sex'}];
+		}
+	}
+}
+close(SA);
+
+if(!defined($mkFile))
+{
+    $ignoreXChromosome = 1;
+}
+
+if(!$ignoreXChromosome)
+{
+	#read snp annotation file
+	open(MK, $mkFile) || die "Cannot open $mkFile";
+	$headerProcessed = 0;
+	while(<MK>)
+	{
+		s/\r?\n?$//;
+		
+		if(!$headerProcessed)
+		{
+			$colNo = s/\t/\t/g + 1;
+			
+			my @fields = split('\t', $_, $colNo);
+        
+			SEARCH_LABEL: for my $label ('snp-id', 'chromosome')
+			{
+				for my $col (0 .. $#fields)
+				{
+					if ($fields[$col] eq $label)
+					{			
+						$label2col{$label} = $col;
+						next SEARCH_LABEL;
+					}
+				}
+			}
+			
+			$headerProcessed = 1;
+		}
+		else
+		{
+			my @fields = split('\t', $_, $colNo);
+			if ($colNo!=scalar(@fields))
+    		{
+    		    die "Current row does not have the same number of columns(" . scalar(@fields) . ") as preceding rows($colNo)";
+            }
+        
+			my $snp = $fields[$label2col{'snp-id'}];
+			my $chromosome = $fields[$label2col{'chromosome'}];
+			
+			$SNP{$snp}{CHROMOSOME} = $chromosome;
+		}
+	}
+	close(MK);
+}
+
+#read genotype file
+open(TG, $tgFile) || die "Cannot open $tgFile";
+$headerProcessed = 0;
+
+my %POPULATION;
+my @sortedPopulations;
+my @col2sample;
+
+if (!defined($pafFile))
+{
+	my($name, $path, $ext) = fileparse($tgFile, '\..*');
+	$pafFile = "$name.paf";
+}
+
+open(PAF, ">$pafFile") || die "Cannot open $pafFile";
+
+while(<TG>)
+{
+	s/\r?\n?$//;
+	
+	if(!$headerProcessed)
+	{
+		$colNo = s/\t/\t/g + 1;
+		
+		my @fields = split('\t', $_, $colNo);
+        
+		for my $col (1..$#fields)
+		{
+			my $sample = $fields[$col];
+			$col2sample[$col] = $sample;
+			
+			if (!defined($POPULATION{$SAMPLE{$sample}{POPULATION}}))
+			{
+				$POPULATION{$SAMPLE{$sample}{POPULATION}} = ();
+			}
+			
+			push(@{$POPULATION{$SAMPLE{$sample}{POPULATION}}}, $col);
+		}
+		
+		@sortedPopulations = sort(keys(%POPULATION));
+		
+		print PAF "snp-id\t" . join("\t", @sortedPopulations) . "\n";
+		
+		$headerProcessed = 1;
+	}
+	else
+	{
+		my @fields = split('\t', $_, $colNo);
+		if ($colNo!=scalar(@fields))
+		{
+		    die "Current row does not have the same number of columns(" . scalar(@fields) . ") as preceding rows($colNo)";
+        }
+        
+		my $snp = $fields[0];
+		
+		print PAF $snp;
+		
+		if(!$ignoreXChromosome && $SNP{$snp}{CHROMOSOME} eq 'X')
+		{
+			for my $pop (@sortedPopulations)
+			{
+				my $count = 0;
+				my $total = 0;
+				
+				for my $col (@{$POPULATION{$pop}})
+				{
+					my $genotype = $fields[$col];
+					
+					if ($genotype!=-1)
+					{
+						if ($SAMPLE{$col2sample[$col]}{SEX} eq 'male')
+						{
+							$count += $genotype>>1;
+							$total += 1;
+						}
+						else
+						{
+							$count += $genotype;
+							$total += 2;
+						}
+					}
+				}
+
+				if ($total==0)
+				{
+					print PAF "\tn/a";
+					warn "No known alleles for frequency calculation: $pop, $snp";
+				}
+				else
+				{
+					printf PAF "\t%.6f", $count/$total;
+				}
+			}
+			
+			print PAF "\n";
+		}
+		else
+		{
+			for my $pop (@sortedPopulations)
+			{
+				my $count = 0;
+				my $total = 0;
+				
+				for my $col (@{$POPULATION{$pop}})
+				{
+					my $genotype = $fields[$col];
+					
+					if ($genotype!=-1)
+					{
+						$count += $genotype;
+						$total += 2;
+					}
+				}
+				
+				if ($total==0)
+				{
+					print PAF "\tn/a";
+					warn "No valid genotypes for $snp";
+				}
+				else
+				{
+					my $paf = $count/$total;
+										
+					printf PAF "\t%.6f", $paf;
+				}
+			}
+			
+			print PAF "\n";
+		}
+	}
+}
+close(TG);
