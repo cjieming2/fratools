@@ -2,7 +2,7 @@
 
 use warnings;
 use strict;
-use fralib;
+##use fralib;
 use Getopt::Long;
 use POSIX qw(ceil floor);
 use File::Path;
